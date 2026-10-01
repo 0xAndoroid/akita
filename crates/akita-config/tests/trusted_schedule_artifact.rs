@@ -821,3 +821,82 @@ fn unsupported_fold_group_log_basis_is_rejected_not_panicking() {
         assert_rejected_as_invalid_setup::<Cfg>(&opening, "fold opening log_basis");
     }
 }
+
+#[test]
+fn verifier_catalog_view_preserves_identity_and_restricts_available_rows() {
+    let full = checked_in_catalog::<fp128::Dense>();
+    let mut rows = full.rows();
+    let selected = rows.next().unwrap();
+    let omitted = rows.next().unwrap().selection();
+    let bytes = full.to_verifier_view(&[selected.selection()]).unwrap();
+    let view = TrustedScheduleCatalog::<fp128::Dense>::from_verifier_view(&bytes).unwrap();
+    assert_eq!(view.catalog_digest(), full.catalog_digest());
+    assert_eq!(view.len(), 1);
+    assert_eq!(
+        view.resolve_selection(selected.selection())
+            .unwrap()
+            .schedule(),
+        selected.schedule()
+    );
+    assert!(view.resolve_selection(omitted).is_err());
+    assert!(view.to_artifact_bytes().is_err());
+    assert!(akita_config::SetupRequirements::from_catalog::<fp128::Dense>(&view, 14, 1).is_err());
+    assert_eq!(
+        view.catalog()
+            .to_verifier_view(&[selected.selection()])
+            .unwrap(),
+        bytes
+    );
+    assert!(full.to_verifier_view(&[]).is_err());
+    assert!(TrustedScheduleCatalog::<fp128::OneHot>::from_verifier_view(&bytes).is_err());
+    full.catalog().validate_complete().unwrap();
+}
+
+#[test]
+fn verifier_catalog_view_checks_membership_order_and_framing() {
+    let full = checked_in_catalog::<fp128::Dense>();
+    let selected = full.rows().next().unwrap().selection();
+    let bytes = full.to_verifier_view(&[selected]).unwrap();
+    let offset = bytes
+        .windows(32)
+        .position(|window| window == selected.row_digest.as_bytes())
+        .unwrap();
+    let decode = |bytes: &[u8]| TrustedScheduleCatalog::<fp128::Dense>::from_verifier_view(bytes);
+
+    let mut missing = bytes.clone();
+    missing[offset..offset + 32].fill(0);
+    let error = decode(&missing).unwrap_err().to_string();
+    assert!(
+        error.contains("absent from the catalog commitment"),
+        "{error}"
+    );
+
+    let mut duplicate = bytes.clone();
+    duplicate[offset + 32..offset + 64].copy_from_slice(selected.row_digest.as_bytes());
+    assert!(decode(&duplicate).is_err());
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode(&trailing).is_err());
+    let mut epoch = bytes.clone();
+    epoch[8] ^= 1;
+    assert!(decode(&epoch).is_err());
+    assert!(decode(&bytes[..bytes.len() - 1]).is_err());
+
+    // An opaque omitted identity changes the committed catalog, even though
+    // the selected row is still valid. Transcript binding must reject replay.
+    // The final encoded field is terminal.input_witness_len. Altering it must
+    // not bypass the same transition audit used for a complete catalog.
+    let mut malformed_row = bytes.clone();
+    *malformed_row.last_mut().unwrap() ^= 1;
+    let error = decode(&malformed_row).unwrap_err().to_string();
+    assert!(
+        !error.contains("absent from the catalog commitment"),
+        "{error}"
+    );
+
+    let mut changed_commitment = bytes;
+    let last = offset + 32 * (full.len() - 1);
+    changed_commitment[last..last + 32].fill(255);
+    let changed = decode(&changed_commitment).unwrap();
+    assert_ne!(changed.catalog_digest(), full.catalog_digest());
+}

@@ -580,6 +580,79 @@ impl<F: Field + CanonicalEncoding + Valid + AkitaDeserialize<Context = ()>> Akit
     }
 }
 
+impl<F: Field + CanonicalEncoding + Valid + AkitaDeserialize<Context = ()> + 'static>
+    AkitaExpandedSetup<F>
+{
+    /// View a trusted, uncompressed serialized setup in place (see
+    /// [`FlatMatrix::borrow_trusted_with_expected_shape`]), returning it with
+    /// the unread remainder of `bytes`. Like an unvalidated
+    /// `deserialize_with_mode`, this takes the matrix as seed-derived without
+    /// re-deriving it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor is malformed or the matrix cannot be
+    /// viewed in place.
+    pub fn borrow_trusted(
+        bytes: &'static [u8],
+    ) -> Result<(Self, &'static [u8]), SerializationError> {
+        let mut reader = bytes;
+        let descriptor = AkitaSetupDescriptor::deserialize_with_mode(
+            &mut reader,
+            Compress::No,
+            Validate::No,
+            &(),
+        )?;
+        descriptor.check()?;
+        let (shared_matrix, rest) = FlatMatrix::borrow_trusted_with_expected_shape(
+            reader,
+            descriptor.num_field_elements,
+            MAX_GENERIC_SETUP_DECODE_FIELD_ELEMENTS,
+        )?;
+        Ok((
+            Self::from_trusted_seed_derived_parts_unchecked(descriptor, shared_matrix),
+            rest,
+        ))
+    }
+
+    /// Offset of the first matrix coefficient in an uncompressed serialized
+    /// setup: the position [`Self::borrow_trusted`] needs 8-byte aligned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor header is malformed.
+    pub fn coefficient_offset(bytes: &[u8]) -> Result<usize, SerializationError> {
+        let mut reader = bytes;
+        AkitaSetupDescriptor::deserialize_with_mode(&mut reader, Compress::No, Validate::No, &())?;
+        let count_header = 0usize.serialized_size(Compress::No);
+        Ok(bytes.len() - reader.len() + count_header)
+    }
+}
+
+impl<F: Field + CanonicalEncoding + Valid + AkitaDeserialize<Context = ()> + 'static>
+    AkitaVerifierSetup<F>
+{
+    /// View a trusted, uncompressed serialized verifier setup in place: the
+    /// public matrix is used where it lies in `bytes` instead of copied. The
+    /// caller vouches for the bytes as it would for `Validate::No`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the setup is malformed or the matrix cannot be
+    /// viewed in place.
+    pub fn borrow_trusted(bytes: &'static [u8]) -> Result<Self, SerializationError> {
+        let (expanded, rest) = AkitaExpandedSetup::borrow_trusted(bytes)?;
+        let prefix_slots = SetupPrefixVerifierRegistry::deserialize_with_mode(
+            rest,
+            Compress::No,
+            Validate::No,
+            &(),
+        )?;
+        Self::from_parts(Arc::new(expanded), prefix_slots)
+            .map_err(|err| SerializationError::InvalidData(err.to_string()))
+    }
+}
+
 impl<F: Field + CanonicalEncoding + Valid> Valid for AkitaVerifierSetup<F> {
     fn check(&self) -> Result<(), SerializationError> {
         self.expanded.check()?;

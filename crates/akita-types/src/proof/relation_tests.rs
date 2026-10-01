@@ -1,6 +1,7 @@
 use super::*;
 use crate::layout::relation_layout::{RelationGroupRows, RelationRowGeometry};
 use crate::{CommitmentRingDims, CommitmentSliceCount, OpeningMethod};
+use akita_algebra::ring::eval_ring_at_pows_fast;
 use jolt_field::{ExtField, Fp32, FpExt2, NegOneNr, Prime128OffsetA7F7, Ring, Zero};
 
 type F = Fp32<251>;

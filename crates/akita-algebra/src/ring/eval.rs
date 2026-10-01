@@ -5,8 +5,7 @@ use crate::fft::field_pow;
 use akita_error::AkitaError;
 #[cfg(test)]
 use jolt_field::ExtField;
-use jolt_field::Unreduced;
-use jolt_field::{Field, MulBaseUnreduced, Zero};
+use jolt_field::{Field, MulBaseUnreduced};
 
 /// Return the first `len` powers of `alpha`, starting with one.
 pub fn scalar_powers<F: Field>(alpha: F, len: usize) -> Vec<F> {
@@ -132,17 +131,13 @@ where
     E: MulBaseUnreduced<F>,
 {
     debug_assert_eq!(alpha_pows.len(), coeffs.len());
-    let accum = coeffs.iter().zip(alpha_pows.iter()).fold(
-        <E as Unreduced>::Product::zero(),
-        |acc, (coeff, alpha_pow)| acc + alpha_pow.mul_base_unreduced(*coeff),
-    );
-    <E as Unreduced>::reduce_product(accum)
+    E::dot_base(alpha_pows, coeffs)
 }
 
 /// Fast (deferred-reduction) counterpart of `eval_ring_at_pows`.
 ///
 /// Same signature and result as `eval_ring_at_pows`, but accumulates all `D`
-/// widening `E × F` products into a single [`Unreduced::Product`] and
+/// widening `E × F` products into a single [`jolt_field::Unreduced::Product`] and
 /// reduces **once** instead of reducing after every coefficient. On a 128-bit
 /// prime the modular reduction is a large fraction of each multiply, so this
 /// turns ~`D` reductions into one.
@@ -165,18 +160,14 @@ where
     E: MulBaseUnreduced<F>,
 {
     debug_assert_eq!(alpha_pows.len(), D);
-    let accum = r.coefficients().iter().zip(alpha_pows.iter()).fold(
-        <E as Unreduced>::Product::zero(),
-        |acc, (coeff, alpha_pow)| acc + alpha_pow.mul_base_unreduced(*coeff),
-    );
-    <E as Unreduced>::reduce_product(accum)
+    E::dot_base(alpha_pows, r.coefficients())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::poly::multilinear_eval;
-    use jolt_field::{CanonicalEncoding, One, Prime128OffsetA7F7};
+    use jolt_field::{CanonicalEncoding, One, Prime128OffsetA7F7, Zero};
 
     type F = Prime128OffsetA7F7;
     const D: usize = 64;

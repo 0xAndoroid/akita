@@ -19,6 +19,7 @@ transcript-keccak = [
   "akita-types/transcript-keccak",
 ]
 [dependencies]
+bincode = { version = "2", features = ["serde"] }
 akita-error = { version = "0.1.0", path = "../akita-error" }
 akita-challenges = { version = "0.1.0", path = "../akita-challenges", default-features = false }
 akita-types = { version = "0.1.0", path = "../akita-types", default-features = false }

@@ -193,6 +193,25 @@ impl<Cfg: CommitmentConfig> TrustedScheduleCatalog<Cfg> {
         Ok(Self::from_validated(catalog))
     }
 
+    /// Load a selected-row verifier view (see
+    /// [`ValidatedScheduleCatalog::to_verifier_view`]) from the application's
+    /// trusted setup path and bind it to this config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AkitaError::InvalidSetup`] when the config policy is invalid
+    /// or the view is rejected by [`ValidatedScheduleCatalog::from_verifier_view`].
+    pub fn from_verifier_view(bytes: &[u8]) -> Result<Self, AkitaError> {
+        validate_config_policy::<Cfg>()?;
+        let catalog = ValidatedScheduleCatalog::from_verifier_view(
+            bytes,
+            Cfg::schedule_family_name(),
+            &policy_of::<Cfg>(),
+            Cfg::ring_challenge_config,
+        )?;
+        Ok(Self::from_validated(catalog))
+    }
+
     /// The config-free validated catalog used for row lookup and artifact I/O.
     #[must_use]
     pub fn catalog(&self) -> &ValidatedScheduleCatalog {

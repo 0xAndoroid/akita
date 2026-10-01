@@ -1,7 +1,7 @@
 //! Streaming XOF cursor used by the signed-sparse fold-challenge sampler.
 //!
 //! Every fold coordinate gets a fresh indexed SHAKE256 stream. A sampler may
-//! reset this cursor between coordinates and reuse its small squeeze buffer.
+//! reset this cursor between coordinates and consume rate lanes directly.
 //!
 //! The cursor's `next_*` helpers use bitmask rejection sampling, so every
 //! returned value is uniform over the requested range with no modulo bias.
@@ -77,17 +77,9 @@ impl IndexedShakeReader {
     }
 }
 
-/// One coordinate normally consumes well below one SHAKE256 rate block. Fill
-/// a bounded buffer so resetting a short coordinate does not squeeze bytes
-/// that will be discarded.
-const XOF_BUFFER_SIZE: usize = 128;
-
-/// Streaming cursor backed by a SHAKE256 XOF and a reusable sub-rate buffer.
+/// Streaming cursor reading directly from the SHAKE256 rate lanes.
 pub(crate) struct XofCursor {
     reader: IndexedShakeReader,
-    buf: [u8; XOF_BUFFER_SIZE],
-    pos: usize,
-    len: usize,
 }
 
 impl XofCursor {
@@ -98,85 +90,46 @@ impl XofCursor {
                 state: [0u64; 25],
                 pos: SHAKE256_RATE,
             },
-            buf: [0u8; XOF_BUFFER_SIZE],
-            pos: 0,
-            len: 0,
         }
     }
 
     /// Build the canonical stream for one claim-major fold coordinate.
     #[cfg(test)]
     pub(crate) fn from_indexed_prefix(prefix: &IndexedXofPrefix, coordinate_index: u64) -> Self {
-        let mut xof = prefix.reader(coordinate_index);
-        let mut buf = [0u8; XOF_BUFFER_SIZE];
-        xof.read(&mut buf);
         Self {
-            reader: xof,
-            buf,
-            pos: 0,
-            len: XOF_BUFFER_SIZE,
+            reader: prefix.reader(coordinate_index),
         }
     }
 
-    /// Reset to another coordinate stream without reallocating the buffer.
+    /// Reset to another coordinate stream without allocating.
     pub(crate) fn reset_indexed_prefix(
         &mut self,
         prefix: &IndexedXofPrefix,
         coordinate_index: u64,
     ) {
         self.reader = prefix.reader(coordinate_index);
-        self.pos = 0;
-        self.len = 0;
-        self.refill();
-    }
-
-    #[inline]
-    fn refill(&mut self) {
-        self.reader.read(&mut self.buf);
-        self.pos = 0;
-        self.len = XOF_BUFFER_SIZE;
     }
 
     #[inline]
     fn next_u8(&mut self) -> u8 {
-        if self.pos >= self.len {
-            self.refill();
+        if self.reader.pos == SHAKE256_RATE {
+            keccak::f1600(&mut self.reader.state);
+            self.reader.pos = 0;
         }
-        let b = self.buf[self.pos];
-        self.pos += 1;
-        b
+        let pos = self.reader.pos;
+        self.reader.pos += 1;
+        (self.reader.state[pos / 8] >> (8 * (pos % 8))) as u8
     }
 
-    /// Copy `out.len()` bytes from the buffered XOF stream in one pass.
+    /// Copy the next stream bytes, permuting only at a rate boundary.
     #[inline]
     pub(crate) fn fill_bytes(&mut self, out: &mut [u8]) {
-        let mut off = 0;
-        while off < out.len() {
-            if self.pos >= self.len {
-                self.refill();
-            }
-            let avail = self.len - self.pos;
-            let take = avail.min(out.len() - off);
-            out[off..off + take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
-            self.pos += take;
-            off += take;
-        }
+        self.reader.read(out);
     }
 
     #[inline]
     fn next_u32(&mut self) -> u32 {
-        if self.pos + 4 <= self.len {
-            let mut bytes = [0u8; 4];
-            bytes.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
-            self.pos += 4;
-            u32::from_le_bytes(bytes)
-        } else {
-            let mut tmp = [0u8; 4];
-            for b in &mut tmp {
-                *b = self.next_u8();
-            }
-            u32::from_le_bytes(tmp)
-        }
+        u32::from_le_bytes(std::array::from_fn(|_| self.next_u8()))
     }
 
     /// Uniformly sample from `0..modulus` using bitmask rejection sampling
@@ -270,20 +223,20 @@ mod tests {
     }
 
     #[test]
-    fn next_u32_preserves_stream_bytes_across_a_refill_boundary() {
+    fn next_u32_preserves_stream_bytes_across_a_rate_boundary() {
         let prefix = IndexedXofPrefix::new(&[0x3cu8; GROUP_ROOT_LEN]).unwrap();
         let mut expected_cursor = XofCursor::from_indexed_prefix(&prefix, 17);
-        let mut expected = [0u8; XOF_BUFFER_SIZE + 4];
+        let mut expected = [0u8; SHAKE256_RATE + 4];
         expected_cursor.fill_bytes(&mut expected);
 
         let mut cursor = XofCursor::from_indexed_prefix(&prefix, 17);
-        let mut prefix_bytes = [0u8; XOF_BUFFER_SIZE - 2];
+        let mut prefix_bytes = [0u8; SHAKE256_RATE - 2];
         cursor.fill_bytes(&mut prefix_bytes);
-        assert_eq!(prefix_bytes, expected[..XOF_BUFFER_SIZE - 2]);
+        assert_eq!(prefix_bytes, expected[..SHAKE256_RATE - 2]);
         assert_eq!(
             cursor.next_u32(),
             u32::from_le_bytes(
-                expected[XOF_BUFFER_SIZE - 2..XOF_BUFFER_SIZE + 2]
+                expected[SHAKE256_RATE - 2..SHAKE256_RATE + 2]
                     .try_into()
                     .unwrap()
             )

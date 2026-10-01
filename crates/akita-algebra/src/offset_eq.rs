@@ -1320,7 +1320,7 @@ impl<F: Field> OffsetEqWindow<F> {
     ///
     /// Matches [`eq_eval_at_index`] exactly, including returning zero for
     /// out-of-domain indices.
-    #[inline]
+    #[inline(always)]
     pub fn eval(&self, index: usize) -> F {
         let low = index & self.low_mask;
         // `low < 2^low_bits == eq_low.len()` by construction; the fallback keeps

@@ -31,6 +31,7 @@ dependencies = [
  "akita-serialization",
  "criterion",
  "jolt-field",
+ "jolt-inlines-ntt",
  "jolt-poly",
  "rand 0.8.8",
  "rand_core 0.6.4",
@@ -171,6 +172,7 @@ dependencies = [
  "akita-challenges",
  "akita-error",
  "akita-types",
+ "bincode",
  "serde",
  "serde_json",
 ]
@@ -231,6 +233,7 @@ name = "akita-transcript"
 version = "0.1.0"
 dependencies = [
  "jolt-field",
+ "jolt-inlines-blake2",
  "spongefish",
 ]
 
@@ -247,6 +250,7 @@ dependencies = [
  "blake2",
  "criterion",
  "jolt-field",
+ "jolt-inlines-blake2",
  "jolt-poly",
  "num-bigint 0.5.1",
  "rand 0.8.8",
@@ -420,6 +424,26 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+dependencies = [
+ "bincode_derive",
+ "serde",
+ "unty",
+]
+
+[[package]]
+name = "bincode_derive"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
+dependencies = [
+ "virtue",
+]
 
 [[package]]
 name = "bit-set"
@@ -884,7 +908,6 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "jolt-field"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt?rev=1618f4b6dc97effcec3568ca7cf2b7420ac9e75f#1618f4b6dc97effcec3568ca7cf2b7420ac9e75f"
 dependencies = [
  "cc",
  "num-traits",
@@ -895,9 +918,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jolt-inlines-blake2"
+version = "0.1.0"
+dependencies = [
+ "digest 0.11.3",
+]
+
+[[package]]
+name = "jolt-inlines-ntt"
+version = "0.1.0"
+
+[[package]]
 name = "jolt-poly"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt?rev=1618f4b6dc97effcec3568ca7cf2b7420ac9e75f#1618f4b6dc97effcec3568ca7cf2b7420ac9e75f"
 dependencies = [
  "jolt-field",
  "jolt-utils",
@@ -911,7 +944,6 @@ dependencies = [
 [[package]]
 name = "jolt-utils"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt?rev=1618f4b6dc97effcec3568ca7cf2b7420ac9e75f#1618f4b6dc97effcec3568ca7cf2b7420ac9e75f"
 dependencies = [
  "num-traits",
 ]
@@ -2052,6 +2084,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2062,6 +2100,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtue"
+version = "0.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "wait-timeout"

@@ -129,6 +129,48 @@ pub trait AkitaDeserialize: Sized {
         Self::deserialize_with_mode(reader, Compress::Yes, Validate::Yes, ctx)
     }
 
+    /// View `count` consecutive trusted values in place at the front of
+    /// `bytes`, returning them with the unread remainder. Only fixed-width
+    /// types whose wire word is their in-memory form support this (see the
+    /// prime-field impls); the default reports the capability gap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the type cannot be viewed in place, `bytes` is
+    /// too short, or the run is not aligned for the element type.
+    fn borrow_many_trusted(
+        bytes: &'static [u8],
+        count: usize,
+    ) -> Result<(&'static [Self], &'static [u8]), SerializationError> {
+        let _ = (bytes, count);
+        Err(SerializationError::InvalidData(
+            "type cannot be viewed in its wire form".to_string(),
+        ))
+    }
+
+    /// Deserialize `count` consecutive values. Fixed-width types override this
+    /// to read the whole run in one pass; the default decodes one at a time.
+    fn deserialize_many_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+        ctx: &Self::Context,
+        count: usize,
+    ) -> Result<Vec<Self>, SerializationError> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(count)
+            .map_err(|_| SerializationError::InvalidData("allocation failed".to_string()))?;
+        for _ in 0..count {
+            out.push(Self::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+                ctx,
+            )?);
+        }
+        Ok(out)
+    }
+
     /// Deserialize one complete compressed artifact and reject trailing bytes.
     fn deserialize_compressed_exact(
         bytes: &[u8],

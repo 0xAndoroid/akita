@@ -5,9 +5,7 @@ use crate::layout::relation_layout::{RelationRhsLayout, RelationRowFamily};
 use crate::proof::RingVec;
 use akita_algebra::eq_poly::EqPolynomial;
 use akita_algebra::offset_eq::eq_eval_at_index;
-use akita_algebra::ring::{
-    eval_flat_ring_at_pows_fast, eval_ring_at, eval_ring_at_pows_fast, scalar_powers,
-};
+use akita_algebra::ring::{eval_flat_ring_at_pows_fast, eval_ring_at, scalar_powers};
 use akita_algebra::CyclotomicRing;
 use akita_error::{checked, AkitaError};
 use jolt_field::{CanonicalEncoding, Field, MulBaseUnreduced};
@@ -333,13 +331,17 @@ where
     E: Field + MulBaseUnreduced<F>,
 {
     let alpha_pows = scalar_powers(alpha, D);
-    for r in rows {
-        if *row_idx >= eq_tau1.len() {
-            return Ok(());
-        }
-        *acc += eq_tau1[*row_idx] * eval_ring_at_pows_fast(r, &alpha_pows);
-        *row_idx += 1;
-    }
+    let count = rows.len().min(eq_tau1.len().saturating_sub(*row_idx));
+    let row_slices = rows[..count]
+        .iter()
+        .map(|r| r.coefficients().as_slice())
+        .collect::<Vec<_>>();
+    *acc += E::weighted_dot_base_rows(
+        &row_slices,
+        &eq_tau1[*row_idx..*row_idx + count],
+        &alpha_pows,
+    );
+    *row_idx += count;
     Ok(())
 }
 
@@ -361,15 +363,14 @@ where
         });
     }
     let alpha_pows = scalar_powers(alpha, D);
-    for row in coeffs.chunks_exact(D) {
-        if *row_idx >= eq_tau1.len() {
-            return Ok(());
-        }
-        let coefficients: [F; D] = row.try_into().map_err(|_| AkitaError::InvalidProof)?;
-        let ring = CyclotomicRing::from_coefficients(coefficients);
-        *acc += eq_tau1[*row_idx] * eval_ring_at_pows_fast(&ring, &alpha_pows);
-        *row_idx += 1;
-    }
+    let count = (coeffs.len() / D).min(eq_tau1.len().saturating_sub(*row_idx));
+    let row_slices = coeffs.chunks_exact(D).take(count).collect::<Vec<_>>();
+    *acc += E::weighted_dot_base_rows(
+        &row_slices,
+        &eq_tau1[*row_idx..*row_idx + count],
+        &alpha_pows,
+    );
+    *row_idx += count;
     Ok(())
 }
 
@@ -439,24 +440,10 @@ where
         .and_then(|count| count.checked_add(v.len()))
         .ok_or_else(|| AkitaError::InvalidSetup("relation row count overflow".into()))?;
     let eq_tau1 = EqPolynomial::evals_prefix(tau1, row_count)?;
-    let alpha_pows = scalar_powers(alpha, D);
     let mut acc = E::zero();
     let mut row_idx = 1usize + n_a;
-
-    for r in u {
-        if row_idx >= eq_tau1.len() {
-            return Ok(acc);
-        }
-        acc += eq_tau1[row_idx] * eval_ring_at_pows_fast(r, &alpha_pows);
-        row_idx += 1;
-    }
-    for r in v {
-        if row_idx >= eq_tau1.len() {
-            return Ok(acc);
-        }
-        acc += eq_tau1[row_idx] * eval_ring_at_pows_fast(r, &alpha_pows);
-        row_idx += 1;
-    }
+    accumulate_extension_rows(&eq_tau1, alpha, u, &mut row_idx, &mut acc)?;
+    accumulate_extension_rows(&eq_tau1, alpha, v, &mut row_idx, &mut acc)?;
     Ok(acc)
 }
 

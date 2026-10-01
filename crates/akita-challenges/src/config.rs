@@ -238,6 +238,20 @@ impl SparseChallengeConfig {
     /// `log2` of the number of distinct challenges this family can emit for ring
     /// degree `D` — the (raw) min-entropy of a single sampled challenge.
     pub fn log2_support_bits<const D: usize>(&self) -> f64 {
+        // Memoized: catalog validation asks this for every row, and the
+        // floating-point log2 sums are the dominant cost of a software-float
+        // verifier (a RISC-V zkVM guest).
+        type SupportCacheEntry = ((usize, usize, usize), f64);
+        static CACHE: std::sync::Mutex<Vec<SupportCacheEntry>> = std::sync::Mutex::new(Vec::new());
+        let key = (D, self.count_pm1, self.count_pm2);
+        if let Some((_, bits)) = CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(k, _)| *k == key)
+        {
+            return *bits;
+        }
         fn log2_binom(n: usize, k: usize) -> f64 {
             if k > n {
                 return f64::NEG_INFINITY;
@@ -247,10 +261,16 @@ impl SparseChallengeConfig {
                 .sum()
         }
         let w = self.weight();
-        if w > D {
-            return f64::NEG_INFINITY;
-        }
-        log2_binom(D, w) + log2_binom(w, self.count_pm1) + w as f64
+        let bits = if w > D {
+            f64::NEG_INFINITY
+        } else {
+            log2_binom(D, w) + log2_binom(w, self.count_pm1) + w as f64
+        };
+        CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((key, bits));
+        bits
     }
 
     /// Reject challenge families whose single-draw support is below

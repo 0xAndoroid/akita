@@ -610,6 +610,34 @@ R_{\mathrm{red}}, & \text{reduced evaluation}.
 \end{cases}
 $$
 
+Reduced evaluation starts from the same physical rows but replaces each
+unreduced product coefficient by the public signed-wrap kernel
+$\kappa_{A,\alpha}$. After row batching and flattening, define
+$R_{\mathrm{red}}(x)$ to be the complete coefficient multiplying witness entry
+$w(x)$. It satisfies the same scalar claim
+
+$$
+h_{\tau}^{\mathrm{raw}}
+=\sum_x w(x)R_{\mathrm{red}}(x),
+$$
+
+but it does not generally factor as one coefficient-power table times one lane
+table. The prover therefore materializes and folds $R_{\mathrm{red}}$ as one
+ephemeral dense Stage-2 oracle. The verifier evaluates its final MLE from
+terminal residue kernels and the fused setup scan without materializing this
+table.
+
+For the rest of this chapter, let
+
+$$
+R_{\mathrm{rel}}
+=
+\begin{cases}
+R_{\mathrm{ord}}, & \text{quotient lifting},\\
+R_{\mathrm{red}}, & \text{reduced evaluation}.
+\end{cases}
+$$
+
 ### Raw and compressed relation terms
 
 Raw mode has no payload-compression term $C_{\mathrm{comp}}$. The mode-selected

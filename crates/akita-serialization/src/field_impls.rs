@@ -63,6 +63,79 @@ macro_rules! impl_prime_serialization {
                     ))
                 }
             }
+
+            fn borrow_many_trusted(
+                bytes: &'static [u8],
+                count: usize,
+            ) -> Result<(&'static [Self], &'static [u8]), SerializationError> {
+                const _: () = assert!(core::mem::size_of::<$field<0>>() == $bytes);
+                let byte_len = count.checked_mul($bytes).ok_or_else(|| {
+                    SerializationError::InvalidData("field run length overflow".into())
+                })?;
+                let (run, rest) = bytes.split_at_checked(byte_len).ok_or_else(|| {
+                    SerializationError::InvalidData("field run is truncated".into())
+                })?;
+                if run.as_ptr().align_offset(core::mem::align_of::<Self>()) != 0 {
+                    return Err(SerializationError::InvalidData(
+                        "field run is not aligned for in-place use".into(),
+                    ));
+                }
+                // SAFETY: the wire word is the little-endian in-memory form (the
+                // encoder writes `to_canonical`, the bulk reader above keeps the
+                // bytes as they are); `run` holds exactly `count` elements, is
+                // aligned (checked above), lives for `'static`, and every bit
+                // pattern is a valid raw word, exactly as an unvalidated read.
+                let elements =
+                    unsafe { core::slice::from_raw_parts(run.as_ptr().cast::<Self>(), count) };
+                Ok((elements, rest))
+            }
+
+            /// One bulk read of the `count * $bytes` little-endian words into
+            /// the element storage itself, then one canonicalizing pass: the
+            /// per-element reader round trip dominated setup decoding on a
+            /// RISC-V guest verifier.
+            fn deserialize_many_with_mode<R: Read>(
+                mut reader: R,
+                _compress: Compress,
+                validate: Validate,
+                _ctx: &(),
+                count: usize,
+            ) -> Result<Vec<Self>, SerializationError> {
+                const _: () = assert!(core::mem::size_of::<$field<0>>() == $bytes);
+                let byte_len = count.checked_mul($bytes).ok_or_else(|| {
+                    SerializationError::InvalidData("field run length overflow".into())
+                })?;
+                // Read straight into the element storage (the wire word is the
+                // little-endian in-memory form), then canonicalize in place.
+                let mut out: Vec<Self> = Vec::new();
+                out.try_reserve_exact(count)
+                    .map_err(|_| SerializationError::InvalidData("allocation failed".into()))?;
+                // SAFETY: `out` has capacity for `count` elements of `$bytes`
+                // bytes each; the bytes are fully initialized by `read_exact`
+                // before `set_len`, and every bit pattern is a valid raw word
+                // for the canonicalizing pass below.
+                unsafe {
+                    let raw =
+                        core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), byte_len);
+                    reader.read_exact(raw)?;
+                    out.set_len(count);
+                }
+                // The wire form is the canonical word (the encoder writes
+                // `to_canonical`), so an unvalidated read keeps the bytes as they
+                // are; a validated read rejects anything out of range.
+                if validate == Validate::Yes {
+                    for element in &mut out {
+                        let value = <$modulus>::from_le(element.$to_canonical()) as u128;
+                        *element = <$field<P> as CanonicalEncoding>::from_u128_checked(value)
+                            .ok_or_else(|| {
+                                SerializationError::InvalidData(
+                                    concat!(stringify!($field), " out of range").into(),
+                                )
+                            })?;
+                    }
+                }
+                Ok(out)
+            }
         }
     };
 }

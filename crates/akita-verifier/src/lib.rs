@@ -29,7 +29,7 @@ mod setup_contribution;
 mod stages;
 mod verifier;
 
-pub use prepared_cache::build_riscv64_terminal_ntt_cache;
+pub use prepared_cache::{build_riscv64_terminal_ntt_cache, TrustedTerminalCache};
 pub use protocol::RelationMatrixEvaluator;
 #[cfg(any(test, feature = "benchmark-support"))]
 pub use protocol::{evaluation_trace_benchmark_case, EvaluationTraceBenchmarkCase};
