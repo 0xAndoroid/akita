@@ -145,14 +145,29 @@ impl<'a, W: PrimeWidth, const K: usize, const D: usize> CenteredI16NttConverter<
         out: &mut CyclotomicCrtNtt<W, K, D>,
     ) {
         assert!(D == 64 && W::R_LOG == 32);
-        let raw = coefficients.map(|value| MontCoeff::from_raw(W::from_i64(i64::from(value))));
+        // Sign-extended i32 residues, two per little-endian word: a Jolt guest
+        // expands each 32-bit store into a multi-row sequence, so aligned
+        // limbs take doubleword stores.
+        let words: [u64; 32] = std::array::from_fn(|index| {
+            let residue = |value: i16| u64::from(i32::from(value) as u32);
+            residue(coefficients[2 * index]) | (residue(coefficients[2 * index + 1]) << 32)
+        });
         for ((limb, prime), twiddles) in out
             .limbs
             .iter_mut()
             .zip(self.params.primes.iter())
             .zip(self.params.twiddles.iter())
         {
-            *limb = raw;
+            let state = limb.as_mut_ptr().cast::<u64>();
+            if state as usize & 7 == 0 {
+                // SAFETY: the sealed width and checked degree make the limb 64
+                // contiguous i32 residues, 256 bytes at this aligned address.
+                unsafe { state.cast::<[u64; 32]>().write(words) };
+            } else {
+                for (slot, &value) in limb.iter_mut().zip(coefficients) {
+                    *slot = MontCoeff::from_raw(W::from_i64(i64::from(value)));
+                }
+            }
             // The R² twist folds signed coefficient conversion into the first product.
             // SAFETY: The checked degree and sealed width pin these array layouts.
             unsafe {
