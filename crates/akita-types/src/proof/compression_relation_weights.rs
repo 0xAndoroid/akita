@@ -299,10 +299,12 @@ impl<E: Field> CompressionRelationWeights<E> {
         let mut low_factor_cache = Vec::new();
         let mut high_equality_cache = Vec::<(usize, OffsetEqWindow<E>)>::new();
         let mut evaluation = E::zero();
-        let mut factors = [E::zero(); 32];
-        let mut values = [E::zero(); 32];
-        for batch in self.events.chunks(factors.len()) {
-            for ((event, factor), value) in batch.iter().zip(&mut factors).zip(&mut values) {
+        // Each term is `scalar · low factor · eq_low · eq_high`; the four-way
+        // product sum lets a field-inline guest form every product in its
+        // register file.
+        let mut terms = [[E::zero(); 4]; 32];
+        for batch in self.events.chunks(terms.len()) {
+            for (event, term) in batch.iter().zip(&mut terms) {
                 if !event.physical_start.is_multiple_of(event.coefficient_count) {
                     if fallback_equality.is_none() {
                         fallback_equality = Some(OffsetEqWindow::new(point)?);
@@ -322,8 +324,7 @@ impl<E: Field> CompressionRelationWeights<E> {
                             sum + power * equality.eval(event.physical_start + offset)
                         },
                     );
-                    *factor = event.scalar;
-                    *value = interval;
+                    *term = [event.scalar, E::one(), interval, E::one()];
                     continue;
                 }
                 let low_bits = event.coefficient_count.trailing_zeros() as usize;
@@ -364,10 +365,10 @@ impl<E: Field> CompressionRelationWeights<E> {
                 let high_equality = high_equality_cache
                     .get(high_cache_index)
                     .ok_or(AkitaError::InvalidProof)?;
-                *factor = event.scalar * low_factor;
-                *value = high_equality.1.eval(high_index);
+                let (eq_low, eq_high) = high_equality.1.eval_factors(high_index);
+                *term = [event.scalar, low_factor, eq_low, eq_high];
             }
-            evaluation += E::dot_product(&factors[..batch.len()], &values[..batch.len()]);
+            evaluation += E::sum_of_products4(&terms[..batch.len()]);
         }
         Ok(evaluation)
     }

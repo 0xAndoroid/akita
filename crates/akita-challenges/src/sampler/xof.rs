@@ -33,9 +33,30 @@ impl IndexedXofPrefix {
         absorb_bytes(&mut state, GROUP_ROOT_LEN, &coordinate_index.to_le_bytes());
         xor_state_byte(&mut state, COORDINATE_INPUT_LEN, SHAKE_DOMAIN_SUFFIX);
         xor_state_byte(&mut state, SHAKE256_RATE - 1, 0x80);
-        keccak::f1600(&mut state);
+        f1600(&mut state);
         IndexedShakeReader { state, pos: 0 }
     }
+}
+
+/// Keccak-f[1600]: the guest's Keccak inline when enabled, else the `keccak`
+/// crate.
+#[inline(always)]
+fn f1600(state: &mut [u64; 25]) {
+    #[cfg(all(feature = "keccak-inline", target_arch = "riscv64"))]
+    {
+        // The inline XORs one 136-byte rate block into the state before the
+        // permutation; an all-zero block leaves the state unchanged first.
+        #[repr(align(8))]
+        struct Block([u8; 136]);
+        static ZERO: Block = Block([0; 136]);
+        // SAFETY: `state` is 25 aligned, writable words; `ZERO` is 136
+        // aligned, readable bytes; the two do not overlap.
+        unsafe {
+            jolt_inlines_keccak256::keccak256_absorb_permute(state.as_mut_ptr(), ZERO.0.as_ptr());
+        }
+    }
+    #[cfg(not(all(feature = "keccak-inline", target_arch = "riscv64")))]
+    keccak::f1600(state);
 }
 
 fn absorb_bytes(state: &mut [u64; 25], offset: usize, bytes: &[u8]) {
@@ -58,7 +79,7 @@ impl IndexedShakeReader {
         let mut written = 0;
         while written < out.len() {
             if self.pos == SHAKE256_RATE {
-                keccak::f1600(&mut self.state);
+                f1600(&mut self.state);
                 self.pos = 0;
             }
             let available = SHAKE256_RATE - self.pos;
@@ -113,7 +134,7 @@ impl XofCursor {
     #[inline]
     fn next_u8(&mut self) -> u8 {
         if self.reader.pos == SHAKE256_RATE {
-            keccak::f1600(&mut self.reader.state);
+            f1600(&mut self.reader.state);
             self.reader.pos = 0;
         }
         let pos = self.reader.pos;
