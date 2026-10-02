@@ -113,23 +113,7 @@ impl<'a> BitReader<'a> {
             let bit_index = self.bit_pos % 8;
             let byte = *self.bytes.get(byte_index).ok_or(AkitaError::InvalidProof)?;
             let available = 8usize - bit_index;
-            #[cfg(any(target_arch = "riscv64", test))]
-            let ones = {
-                // RV64IM has no count-trailing-zero instruction. Word entries
-                // also avoid a subword load in the guest's unary-prefix loop.
-                const ONES: [usize; 256] = {
-                    let mut table = [0; 256];
-                    let mut value = 0;
-                    while value < table.len() {
-                        table[value] = (value as u8).trailing_ones() as usize;
-                        value += 1;
-                    }
-                    table
-                };
-                ONES[usize::from(byte >> bit_index)].min(available)
-            };
-            #[cfg(not(any(target_arch = "riscv64", test)))]
-            let ones = ((byte >> bit_index).trailing_ones() as usize).min(available);
+            let ones = (trailing_ones(u64::from(byte >> bit_index)) as usize).min(available);
             quotient = quotient
                 .checked_add(ones as u64)
                 .ok_or(AkitaError::InvalidProof)?;
@@ -149,6 +133,38 @@ impl<'a> BitReader<'a> {
             }
         }
     }
+}
+
+/// Trailing one bits of `word`.
+#[inline]
+fn trailing_ones(word: u64) -> u32 {
+    #[cfg(any(target_arch = "riscv64", test))]
+    {
+        // RV64IM has no count-trailing-zero instruction. Word entries also
+        // avoid a subword load in the guest's decode loop.
+        const ONES: [u32; 256] = {
+            let mut table = [0; 256];
+            let mut value = 0;
+            while value < table.len() {
+                table[value] = (value as u8).trailing_ones();
+                value += 1;
+            }
+            table
+        };
+        let mut ones = 0;
+        let mut rest = word;
+        while ones < u64::BITS {
+            let run = ONES[(rest & 0xff) as usize];
+            ones += run;
+            if run < 8 {
+                break;
+            }
+            rest >>= 8;
+        }
+        ones
+    }
+    #[cfg(not(any(target_arch = "riscv64", test)))]
+    word.trailing_ones()
 }
 
 #[derive(Debug, Default)]
@@ -332,6 +348,25 @@ fn golomb_rice_decode_one_from(
     zigzag_w: u32,
     max_quotient: u64,
 ) -> Result<i64, AkitaError> {
+    // A code whose stop bit and remainder fall inside one input word decodes
+    // from that window; longer codes take the bitwise path below.
+    if rice_low_bits < u64::BITS {
+        if let Some(window) = reader.word_window(u64::BITS) {
+            let quotient = trailing_ones(window);
+            if quotient + rice_low_bits < u64::BITS {
+                if u64::from(quotient) > max_quotient {
+                    return Err(AkitaError::InvalidProof);
+                }
+                let remainder = if rice_low_bits == 0 {
+                    0
+                } else {
+                    (window >> (quotient + 1)) & ((1u64 << rice_low_bits) - 1)
+                };
+                reader.bit_pos += (quotient + 1 + rice_low_bits) as usize;
+                return zigzag_decode((u64::from(quotient) << rice_low_bits) | remainder, zigzag_w);
+            }
+        }
+    }
     let quotient = reader.read_unary_ones(max_quotient)?;
     let u = if rice_low_bits == 0 {
         quotient
@@ -598,6 +633,53 @@ mod tests {
         assert!(
             golomb_rice_decode_vec(&bytes, 1, rice_low_bits, zigzag_w, max_quotient, Ok,).is_err()
         );
+    }
+
+    #[test]
+    fn golomb_rice_word_window_decode_round_trips_and_rejects_at_every_alignment() {
+        let cap = 1008u128;
+        let rice_low_bits = wire_rice_low_bits(cap);
+        let zigzag_w = golomb_rice_zigzag_width(cap);
+        let max_quotient =
+            golomb_rice_max_quotient_for_cap(cap, rice_low_bits, zigzag_w).expect("max q");
+        let values: Vec<i64> = (0..400).map(|i| (i * 211 % 2017) - 1008).collect();
+        let encoded = golomb_rice_encode_vec(&values, rice_low_bits, zigzag_w).unwrap();
+
+        let mut long_run = BitWriter::default();
+        for _ in 0..200 {
+            golomb_rice_encode_one_into(&mut long_run, 7, rice_low_bits, zigzag_w).unwrap();
+        }
+        for _ in 0..=max_quotient {
+            long_run.write_bit(true);
+        }
+        long_run.write_bit(false);
+        long_run.write_bits(0, rice_low_bits);
+        long_run.write_bits(0, 63);
+        let long_run = long_run.finish();
+
+        let mut storage = vec![0u8; encoded.len().max(long_run.len()) + 8];
+        for alignment in 0..8 {
+            storage[alignment..alignment + encoded.len()].copy_from_slice(&encoded);
+            let bytes = &storage[alignment..alignment + encoded.len()];
+            let decoded = golomb_rice_decode_vec(
+                bytes,
+                values.len(),
+                rice_low_bits,
+                zigzag_w,
+                max_quotient,
+                Ok,
+            )
+            .unwrap();
+            assert_eq!(decoded, values, "alignment {alignment}");
+
+            storage[alignment..alignment + long_run.len()].copy_from_slice(&long_run);
+            let bytes = &storage[alignment..alignment + long_run.len()];
+            assert!(
+                golomb_rice_decode_vec(bytes, 201, rice_low_bits, zigzag_w, max_quotient, Ok)
+                    .is_err(),
+                "alignment {alignment}"
+            );
+        }
     }
 
     #[test]
