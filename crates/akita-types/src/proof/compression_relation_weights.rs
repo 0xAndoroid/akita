@@ -305,7 +305,15 @@ impl<E: Field> CompressionRelationWeights<E> {
         let mut terms = [[E::zero(); 4]; 32];
         for batch in self.events.chunks(terms.len()) {
             for (event, term) in batch.iter().zip(&mut terms) {
-                if !event.physical_start.is_multiple_of(event.coefficient_count) {
+                // A Jolt guest expands `remu` into a multi-row sequence, so
+                // power-of-two counts, the common case, test with a mask.
+                let count = event.coefficient_count;
+                let aligned = if count.is_power_of_two() {
+                    event.physical_start & (count - 1) == 0
+                } else {
+                    event.physical_start.is_multiple_of(count)
+                };
+                if !aligned {
                     if fallback_equality.is_none() {
                         fallback_equality = Some(OffsetEqWindow::new(point)?);
                     }
