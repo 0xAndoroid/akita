@@ -134,7 +134,18 @@ impl MetalRuntime {
         let command = self.queue.new_command_buffer();
         command.set_label("Akita immutable setup upload");
         let encoder = command.new_blit_command_encoder();
-        encoder.copy_from_buffer(&staging, 0, &buffer, 0, bytes as u64);
+        // A single 6 GiB blit on M5 Max leaves the bytes past 4 GiB uncopied.
+        const COPY_CHUNK_BYTES: usize = 1 << 30;
+        for offset in (0..bytes).step_by(COPY_CHUNK_BYTES) {
+            let length = (bytes - offset).min(COPY_CHUNK_BYTES);
+            encoder.copy_from_buffer(
+                &staging,
+                offset as u64,
+                &buffer,
+                offset as u64,
+                length as u64,
+            );
+        }
         encoder.end_encoding();
         let _ = complete_command(command)?;
         Ok(buffer)

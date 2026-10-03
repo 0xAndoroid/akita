@@ -332,7 +332,11 @@ mod tests {
         )
         .unwrap();
 
-        let cpu = CpuBackend::DEFAULT;
+        let cpu = CpuBackend::with_resource_limits(
+            CpuBackend::DEFAULT_MAX_CACHED_RING_SWITCH_ELEMENTS,
+            32 << 20,
+        )
+        .unwrap();
         let cpu_prepared = cpu.prepare_setup(&setup).unwrap();
         let cpu_view =
             <OneHotPoly<F, u8> as RootCommitSource<F, RING_D>>::commit_view(&generic).unwrap();
@@ -398,6 +402,11 @@ mod tests {
     #[test]
     fn parity_d128_rank3_k256_rows_2p20() {
         assert_rank3_parity(1 << 20, 1 << 16, 5, Some(1 << 19));
+    }
+
+    #[test]
+    fn parity_d128_rank3_k256_log42_block_geometry() {
+        assert_rank3_parity(1 << 19, 1 << 20, 5, None);
     }
 
     #[test]
