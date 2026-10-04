@@ -4879,15 +4879,24 @@ inline void akita_store_fp128_d128_rank3(
     uint task_block,
     uint element,
     uint position_partial,
-    uint simd_lane)
+    uint simd_lane,
+    bool accumulate)
 {
     ulong block = (ulong)task_column * params.blocks_per_column + (ulong)task_block;
     ulong output_base = (block * params.n_a + (ulong)element) * (ulong)PACKED_FP128_D128_RANK3_D;
     ulong partial_base = (ulong)position_partial * params.output_coefficients + output_base;
-    partials[partial_base + simd_lane] = akita_reduce_radix26(accumulator, 0u);
-    partials[partial_base + simd_lane + 32ul] = akita_reduce_radix26(accumulator, 1u);
-    partials[partial_base + simd_lane + 64ul] = akita_reduce_radix26(accumulator, 2u);
-    partials[partial_base + simd_lane + 96ul] = akita_reduce_radix26(accumulator, 3u);
+    AkitaFp128 value_0 = akita_reduce_radix26(accumulator, 0u);
+    partials[partial_base + simd_lane] = accumulate
+        ? akita_add(partials[partial_base + simd_lane], value_0) : value_0;
+    AkitaFp128 value_1 = akita_reduce_radix26(accumulator, 1u);
+    partials[partial_base + simd_lane + 32ul] = accumulate
+        ? akita_add(partials[partial_base + simd_lane + 32ul], value_1) : value_1;
+    AkitaFp128 value_2 = akita_reduce_radix26(accumulator, 2u);
+    partials[partial_base + simd_lane + 64ul] = accumulate
+        ? akita_add(partials[partial_base + simd_lane + 64ul], value_2) : value_2;
+    AkitaFp128 value_3 = akita_reduce_radix26(accumulator, 3u);
+    partials[partial_base + simd_lane + 96ul] = accumulate
+        ? akita_add(partials[partial_base + simd_lane + 96ul], value_3) : value_3;
 }
 
 kernel void akita_packed_onehot_commit_fp128_d128_rank3(
@@ -4896,6 +4905,7 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
     device AkitaFp128 *partials [[buffer(2)]],
     constant PackedOneHotCommitParams &params [[buffer(3)]],
     device const ulong *active_zero_rows [[buffer(4)]],
+    constant uint &half_index [[buffer(5)]],
     uint thread_index [[thread_index_in_threadgroup]],
     uint3 threadgroup_index [[threadgroup_position_in_grid]])
 {
@@ -4912,9 +4922,9 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
     uint partial_group = threadgroup_index.x / streams;
     uint position_partial = partial_group % position_partials;
     uint element = partial_group / position_partials;
-    uint positions_per_partial = (uint)params.positions_per_partial;
-    uint partial_start = position_partial * positions_per_partial;
-    ulong rows_per_partial = (ulong)positions_per_partial / 2ul;
+    uint positions_per_partial = (uint)params.positions_per_partial / 2u;
+    uint partial_start = position_partial * positions_per_partial
+        + half_index * (uint)params.positions_per_block / 2u;
     ulong rows_per_block = params.positions_per_block / 2ul;
     uint live_columns = (uint)params.num_columns;
     uint dispatch_task_0 = stream * tasks_per_stream
@@ -4952,7 +4962,7 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
                 value.limb[3] >> 8u;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        ulong tile_rows = (ulong)position_partial * rows_per_partial
+        ulong tile_rows = (ulong)partial_start / 2ul
             + (ulong)tile * (ulong)PACKED_FP128_D128_RANK3_ROWS_PER_TILE;
         if (active_0) {
             akita_fp128_d128_rank3_accumulate_task_tile(
@@ -4975,12 +4985,12 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
     if (active_0) {
         akita_store_fp128_d128_rank3(
             partials, accumulator_0, params, column_0, block_0, element, position_partial,
-            simd_lane);
+            simd_lane, half_index != 0u);
     }
     if (active_1) {
         akita_store_fp128_d128_rank3(
             partials, accumulator_1, params, column_1, block_1, element, position_partial,
-            simd_lane);
+            simd_lane, half_index != 0u);
     }
 }
 
