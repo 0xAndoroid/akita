@@ -167,9 +167,9 @@ mod tests {
     use super::*;
     use crate::MetalExecutionPolicy;
 
-    fn check_recursive_decompose<const D: usize>(backend: &MetalBackend) {
+    fn check_recursive_decompose<const D: usize>(backend: &MetalBackend, num_rings: usize) {
         let modulus = (-F::one()).to_canonical_u128() + 1;
-        for log_basis in [8u32, 10, 13, 16] {
+        for log_basis in [8u32, 10, 12, 13, 16] {
             let num_digits = 128usize.div_ceil(log_basis as usize);
             let threshold = decompose_centering_threshold(num_digits, log_basis, modulus);
             let boundary = [
@@ -182,7 +182,7 @@ mod tests {
                 modulus - 1,
                 1u128 << 127,
             ];
-            let rings = (0..16)
+            let rings = (0..num_rings)
                 .map(|ring| {
                     CyclotomicRing::from_coefficients(std::array::from_fn(|coefficient| {
                         let index = ring * D + coefficient;
@@ -195,7 +195,9 @@ mod tests {
                     }))
                 })
                 .collect::<Vec<CyclotomicRing<F, D>>>();
-            let source = DensePoly::from_ring_coeffs(rings.clone());
+            let mut padded_cpu_rings = rings.clone();
+            padded_cpu_rings.resize(num_rings.next_power_of_two(), CyclotomicRing::zero());
+            let source = DensePoly::from_ring_coeffs(padded_cpu_rings);
             let view = <DensePoly<F> as RootOpeningSource<F, D>>::opening_view(&source).unwrap();
             let challenges = (0..4)
                 .map(|block| SparseChallenge {
@@ -223,14 +225,24 @@ mod tests {
                 .decompose_recursive_rings(&rings, &plan)
                 .unwrap()
                 .unwrap();
-            assert_eq!(actual, expected, "D={D}, log_basis={log_basis}");
+            assert!(
+                actual == expected,
+                "D={D}, log_basis={log_basis}, rings={num_rings}"
+            );
         }
     }
 
     #[test]
     fn recursive_decompose_fold_matches_cpu() {
         let backend = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
-        check_recursive_decompose::<64>(&backend);
-        check_recursive_decompose::<128>(&backend);
+        check_recursive_decompose::<64>(&backend, 16);
+        check_recursive_decompose::<128>(&backend, 16);
+    }
+
+    #[test]
+    fn recursive_decompose_fold_partial_last_block_matches_cpu() {
+        let backend = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
+        check_recursive_decompose::<64>(&backend, 15);
+        check_recursive_decompose::<128>(&backend, 15);
     }
 }

@@ -364,6 +364,7 @@ fn centered_i32_decompose_matches_ring_decompose() {
         (17usize, 2u32),
         (7usize, 5u32),
         (6usize, 6u32),
+        (5usize, 8u32),
     ] {
         let mut got = vec![[0i8; D]; num_digits];
         balanced_decompose_centered_i32_i8_into(&centered, &mut got, log_basis);
