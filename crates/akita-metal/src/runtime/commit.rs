@@ -518,10 +518,14 @@ impl MetalRuntime {
                 encoder.set_buffer(2, Some(&partials), 0);
                 set_inline_bytes(encoder, 3, &dispatch_params);
                 encoder.set_buffer(4, Some(&active_zero_rows), 0);
-                encoder.dispatch_thread_groups(
-                    MTLSize::new(command_threadgroups, 1, 1),
-                    MTLSize::new(FP128_D512_THREADS as u64, 1, 1),
-                );
+                // The serial encoder orders second-half reads after first-half writes.
+                for half in 0..2u32 {
+                    set_inline_bytes(encoder, 5, &half);
+                    encoder.dispatch_thread_groups(
+                        MTLSize::new(command_threadgroups, 1, 1),
+                        MTLSize::new(FP128_D512_THREADS as u64, 1, 1),
+                    );
+                }
                 encoder.end_encoding();
                 command.commit();
                 commands.push(command);
