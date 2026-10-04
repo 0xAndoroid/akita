@@ -654,17 +654,15 @@ pub(super) fn balanced_decompose_centered_i32_i8_into<const D: usize>(
         "levels * log_basis must be <= 128 + log_basis"
     );
 
-    let half_b = 1i128 << (log_basis - 1);
-    let b = half_b << 1;
-    let mask = b - 1;
-
-    for coeff_idx in 0..D {
-        let mut c = centered[coeff_idx] as i128;
-        for plane in out.iter_mut() {
-            let d = c & mask;
-            let balanced = if d >= half_b { d - b } else { d };
-            c = (c - balanced) >> log_basis;
-            plane[coeff_idx] = balanced as i8;
+    let half_b = 1i32 << (log_basis - 1);
+    let mask = (half_b << 1) - 1;
+    let mut carries = *centered;
+    for plane in out {
+        for (digit, value) in plane.iter_mut().zip(&mut carries) {
+            let raw = *value & mask;
+            let carry = i32::from(raw >= half_b);
+            *digit = (raw - (carry << log_basis)) as i8;
+            *value = (*value >> log_basis) + carry;
         }
     }
 }
