@@ -146,6 +146,23 @@ impl MetalPreparedSetup {
             .len())
     }
 
+    /// Drops every resident matrix prefix and returns their bytes; the next
+    /// request repacks the prefix it needs. Buffers still held by an
+    /// in-flight command stay alive through their `Arc` until it completes.
+    pub fn release_matrices(&self) -> Result<usize, MetalCommitError> {
+        let mut matrices = self
+            .matrices
+            .lock()
+            .map_err(|_| MetalCommitError::PoisonedLock)?;
+        let bytes = matrices.values().try_fold(0usize, |total, matrix| {
+            total
+                .checked_add(matrix.bytes)
+                .ok_or(MetalCommitError::ShapeOverflow("matrix cache bytes"))
+        })?;
+        matrices.clear();
+        Ok(bytes)
+    }
+
     /// Total bytes across independently allocated resident matrix prefixes.
     pub fn matrix_cache_bytes(&self) -> Result<usize, MetalCommitError> {
         self.matrices
@@ -190,5 +207,31 @@ mod tests {
         assert!(Arc::ptr_eq(&root.buffer, &outer.buffer));
         assert_eq!(prepared.matrix_cache_entries().unwrap(), 1);
         assert_eq!(prepared.matrix_cache_bytes().unwrap(), root.bytes);
+    }
+
+    #[test]
+    fn released_matrices_are_repacked_on_the_next_request() {
+        let setup = AkitaProverSetup::<F>::generate_with_capacity(
+            20,
+            1,
+            SetupMatrixCapacity {
+                num_field_elements: 512 * 16,
+            },
+        )
+        .unwrap();
+        let backend = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
+        let prepared = backend.prepare_setup(&setup).unwrap();
+        let runtime = backend.runtime().unwrap();
+
+        let first = prepared.matrix(runtime, 512, 1, 16).unwrap();
+        assert_eq!(prepared.release_matrices().unwrap(), first.bytes);
+        assert_eq!(prepared.matrix_cache_entries().unwrap(), 0);
+        assert_eq!(prepared.matrix_cache_bytes().unwrap(), 0);
+
+        let repacked = prepared.matrix(runtime, 512, 1, 16).unwrap();
+        assert!(!repacked.cache_hit);
+        assert!(!Arc::ptr_eq(&first.buffer, &repacked.buffer));
+        assert_eq!(repacked.bytes, first.bytes);
+        assert_eq!(prepared.matrix_cache_entries().unwrap(), 1);
     }
 }
