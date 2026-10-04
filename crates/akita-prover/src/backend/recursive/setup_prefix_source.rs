@@ -280,11 +280,12 @@ fn setup_prefix_evaluate_and_fold<F: Field + CanonicalEncoding, const D: usize>(
     }
 }
 
-fn setup_prefix_decompose_fold<F: Field + CanonicalEncoding, const D: usize>(
-    expanded: &AkitaExpandedSetup<F>,
+/// Borrow setup-prefix rings after checking the decomposition plan's frozen geometry.
+pub fn setup_prefix_decompose_rings<'a, F: Field, const D: usize>(
+    expanded: &'a AkitaExpandedSetup<F>,
     slot: &SetupPrefixSlot<F>,
-    plan: DecomposeFoldPlan<'_>,
-) -> Result<crate::DecomposeFoldWitness<F>, AkitaError> {
+    plan: &DecomposeFoldPlan<'_>,
+) -> Result<&'a [CyclotomicRing<F, D>], AkitaError> {
     let coeffs = setup_prefix_rings::<F, D>(
         expanded.shared_matrix(),
         slot.id.natural_len,
@@ -299,6 +300,15 @@ fn setup_prefix_decompose_fold<F: Field + CanonicalEncoding, const D: usize>(
             "setup-prefix decompose plan disagrees with frozen block geometry".into(),
         ));
     }
+    Ok(coeffs)
+}
+
+fn setup_prefix_decompose_fold<F: Field + CanonicalEncoding, const D: usize>(
+    expanded: &AkitaExpandedSetup<F>,
+    slot: &SetupPrefixSlot<F>,
+    plan: DecomposeFoldPlan<'_>,
+) -> Result<crate::DecomposeFoldWitness<F>, AkitaError> {
+    let coeffs = setup_prefix_decompose_rings::<F, D>(expanded, slot, &plan)?;
     let q = (-F::one())
         .to_u128_checked()
         .expect("Akita field element must fit in u128")

@@ -7,7 +7,7 @@ use akita_algebra::CyclotomicRing;
 use akita_error::AkitaError;
 use akita_prover::backend::{
     DenseBatchView, DenseView, MultilinearPolynomialBatchView, MultilinearPolynomialView,
-    OneHotBatchView, OneHotView, RecursiveFoldView,
+    OneHotBatchView, OneHotView,
 };
 use akita_prover::compute::{
     CompressionComputeBackend, CompressionRowsProducts, DecomposeFoldBatchPlan, DecomposeFoldPlan,
@@ -1391,10 +1391,6 @@ macro_rules! delegate_indexed_opening_pair_to_cpu {
 }
 
 delegate_opening_pair_to_cpu!(DenseView<'_, F, D>, DenseBatchView<'_, F, D>);
-delegate_opening_pair_to_cpu!(
-    RecursiveFoldView<'_, F, D>,
-    RecursiveFoldBatchView<'_, F, D>
-);
 delegate_opening_pair_to_cpu!(
     SuffixWitnessView<'_, F, D>,
     SuffixWitnessBatchView<'_, F, D>
