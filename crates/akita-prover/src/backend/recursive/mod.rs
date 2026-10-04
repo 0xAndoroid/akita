@@ -6,5 +6,7 @@
 mod setup_prefix_source;
 mod witness;
 
-pub use setup_prefix_source::{RecursiveFoldBatchView, RecursiveFoldSource, RecursiveFoldView};
+pub use setup_prefix_source::{
+    setup_prefix_decompose_rings, RecursiveFoldBatchView, RecursiveFoldSource, RecursiveFoldView,
+};
 pub use witness::{RecursiveWitnessFlat, SuffixWitnessBatchView, SuffixWitnessView};

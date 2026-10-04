@@ -25,6 +25,7 @@ mod commands;
 mod commit;
 mod direct_range;
 mod fold;
+mod recursive_fold;
 mod relation_prefix;
 mod relation_resident;
 mod relation_rounds;
@@ -35,6 +36,7 @@ mod rows;
 mod tests;
 
 use commands::*;
+pub(crate) use recursive_fold::RecursiveDecomposeFoldParams;
 use resources::{d512_linear_relation_resources, recursive_commit_resources};
 
 const DIRECT_KERNEL_NAME: &str = "akita_onehot_commit_gather";
@@ -112,7 +114,11 @@ const FP128_DIRECT_RELATION_SETUP_SOURCE_KERNEL_NAME: &str =
     "akita_fp128_direct_relation_setup_source";
 const FP128_DIRECT_RELATION_SPARSE_SOURCE_KERNEL_NAME: &str =
     "akita_fp128_direct_relation_sparse_source";
-const KERNEL_SOURCE: &str = include_str!("kernels/onehot.metal");
+const KERNEL_SOURCE: &str = concat!(
+    include_str!("kernels/onehot.metal"),
+    "\n",
+    include_str!("kernels/recursive_fold.metal"),
+);
 const FP128_D512_THREADS: usize = 1_024;
 const PACKED_ONEHOT_BUFFER_ALIGNMENT: usize = 16 * 1024;
 pub(crate) const FP128_D512_TASKS_PER_STREAM: usize = 32;
@@ -979,6 +985,8 @@ pub(crate) struct MetalRuntime {
     fp128_packed_onehot_coefficient_packing_partials_pipeline: ComputePipelineState,
     fp128_packed_onehot_coefficient_packing_reduce_pipeline: ComputePipelineState,
     fp128_d512_decompose_fold_pipeline: ComputePipelineState,
+    fp128_recursive_decompose_pipeline: ComputePipelineState,
+    recursive_sparse_digit_fold_pipeline: ComputePipelineState,
     fp128_d128_decompose_fold_pipeline: ComputePipelineState,
     fp128_d128_subring64_decompose_fold_pipeline: ComputePipelineState,
     fp128_d512_subring64_decompose_fold_pipeline: ComputePipelineState,
@@ -1066,6 +1074,8 @@ impl MetalRuntime {
                 FP128_PACKED_ONEHOT_COEFFICIENT_PACKING_REDUCE_KERNEL_NAME,
             )?,
             fp128_d512_decompose_fold_pipeline: pipeline(FP128_D512_DECOMPOSE_FOLD_KERNEL_NAME)?,
+            fp128_recursive_decompose_pipeline: pipeline("akita_fp128_recursive_decompose")?,
+            recursive_sparse_digit_fold_pipeline: pipeline("akita_recursive_sparse_digit_fold")?,
             fp128_d128_decompose_fold_pipeline: pipeline(FP128_D128_DECOMPOSE_FOLD_KERNEL_NAME)?,
             fp128_d128_subring64_decompose_fold_pipeline: pipeline(
                 FP128_D128_SUBRING64_DECOMPOSE_FOLD_KERNEL_NAME,
