@@ -182,113 +182,82 @@ impl MetalRuntime {
         })
     }
 
-    pub(crate) fn dispatch_fp128_linear_relation<const D: usize>(
+    pub(crate) fn dispatch_fp128_d512_linear_relation<const D: usize>(
         &self,
         matrix: &Buffer,
         rhs: &[[i32; D]],
-        digits: &[[i8; D]],
-        params: LinearRelationParams,
+        params: D512LinearRelationParams,
     ) -> Result<D512LinearRelationDispatchOutcome, MetalCommitError> {
         autoreleasepool(|| {
             let num_columns = usize::try_from(params.num_columns)
-                .map_err(|_| MetalCommitError::ShapeOverflow("linear relation columns"))?;
+                .map_err(|_| MetalCommitError::ShapeOverflow("D512 relation columns"))?;
             let num_tiles = usize::try_from(params.num_tiles)
-                .map_err(|_| MetalCommitError::ShapeOverflow("linear relation tiles"))?;
-            let num_rows = params.output_coefficients as usize / D;
-            let ntt_size = if params.cyclic_digits == 0 { 2 * D } else { D };
-            let input_columns = if params.cyclic_digits == 0 {
-                rhs.len()
-            } else {
-                digits.len()
-            };
+                .map_err(|_| MetalCommitError::ShapeOverflow("D512 relation tiles"))?;
             let expected_tiles = num_columns.div_ceil(FP128_D512_LINEAR_RELATION_COLUMNS_PER_TILE);
             let expected_matrix_bytes = num_columns
-                .checked_mul(D)
-                .and_then(|n| n.checked_mul(num_rows))
+                .checked_mul(512)
                 .and_then(|count| count.checked_mul(size_of::<Fp128Limbs>()))
-                .ok_or(MetalCommitError::ShapeOverflow("linear relation matrix"))?;
-            if !matches!(D, 128 | 512)
-                || input_columns != num_columns
-                || num_rows == 0
-                || params.output_coefficients as usize != num_rows * D
-                || params.cyclic_digits > 1
-                || (params.cyclic_digits == 0 && !digits.is_empty())
-                || (params.cyclic_digits != 0 && !rhs.is_empty())
+                .ok_or(MetalCommitError::ShapeOverflow("D512 relation matrix"))?;
+            if D != 512
+                || rhs.len() != num_columns
                 || params.columns_per_tile != FP128_D512_LINEAR_RELATION_COLUMNS_PER_TILE as u64
                 || num_tiles != expected_tiles
                 || params.num_primes != FP128_D512_LINEAR_RELATION_NUM_PRIMES as u64
-                || params.ntt_size != ntt_size as u64
+                || params.ntt_size != FP128_D512_LINEAR_RELATION_NTT_SIZE as u64
+                || params.output_coefficients != 512
                 || matrix.length() < expected_matrix_bytes as u64
-                || !self.supports_fp128_linear_relation(
-                    D,
-                    num_rows,
-                    num_columns,
-                    params.rhs_abs_bound,
-                )
+                || !self.supports_fp128_d512_linear_relation(num_columns, params.rhs_abs_bound)
             {
                 return Err(MetalCommitError::UnsupportedShape(
-                    "fp128 relation rows exceed the exact CRT or device limits".into(),
+                    "fp128 D512 linear relation exceeds the exact CRT or device limits".into(),
                 ));
             }
 
             let buffer_start = Instant::now();
-            let (rhs_buffer, rhs_zero_copy, rhs_bytes) = if params.cyclic_digits == 0 {
-                let buffer = self.shared_slice_buffer(rhs)?;
-                (buffer.buffer, buffer.zero_copy, size_of_val(rhs))
-            } else {
-                let buffer = self.shared_slice_buffer(digits)?;
-                (buffer.buffer, buffer.zero_copy, size_of_val(digits))
-            };
+            let rhs_buffer = self.shared_slice_buffer(rhs)?;
             let partial_count = num_tiles
                 .checked_mul(FP128_D512_LINEAR_RELATION_NUM_PRIMES)
-                .and_then(|count| {
-                    count
-                        .checked_mul(ntt_size)
-                        .and_then(|n| n.checked_mul(num_rows))
-                })
-                .ok_or(MetalCommitError::ShapeOverflow("linear relation partials"))?;
+                .and_then(|count| count.checked_mul(FP128_D512_LINEAR_RELATION_NTT_SIZE))
+                .ok_or(MetalCommitError::ShapeOverflow("D512 relation partials"))?;
             let partial_bytes = partial_count.checked_mul(size_of::<i32>()).ok_or(
-                MetalCommitError::ShapeOverflow("linear relation partial bytes"),
+                MetalCommitError::ShapeOverflow("D512 relation partial bytes"),
             )?;
             let partials = self.private_buffer(partial_bytes)?;
             let residue_count = FP128_D512_LINEAR_RELATION_NUM_PRIMES
-                .checked_mul(ntt_size)
-                .and_then(|n| n.checked_mul(num_rows))
-                .ok_or(MetalCommitError::ShapeOverflow("linear relation residues"))?;
+                .checked_mul(FP128_D512_LINEAR_RELATION_NTT_SIZE)
+                .ok_or(MetalCommitError::ShapeOverflow("D512 relation residues"))?;
             let residue_bytes = residue_count.checked_mul(size_of::<u32>()).ok_or(
-                MetalCommitError::ShapeOverflow("linear relation residue bytes"),
+                MetalCommitError::ShapeOverflow("D512 relation residue bytes"),
             )?;
             let residues = self.private_buffer(residue_bytes)?;
-            let output_bytes = (num_rows * D)
+            let output_bytes = 512usize
                 .checked_mul(size_of::<Fp128Limbs>())
-                .ok_or(MetalCommitError::ShapeOverflow("linear relation output"))?;
+                .ok_or(MetalCommitError::ShapeOverflow("D512 relation output"))?;
             let output = self.shared_buffer(output_bytes)?;
             let buffer_setup = buffer_start.elapsed();
 
             let resources = &self.fp128_d512_linear_relation_resources;
             let command = self.queue.new_command_buffer();
-            command.set_label("Akita fp128 linear relation");
+            command.set_label("Akita fp128 D512 linear relation");
             let encoder = command.new_compute_command_encoder();
-            encoder.set_label("Akita linear relation tiled NTT");
+            encoder.set_label("Akita D512 linear relation tiled NTT");
             encoder.set_compute_pipeline_state(&self.fp128_d512_linear_relation_partials_pipeline);
             encoder.set_buffer(0, Some(matrix), 0);
-            encoder.set_buffer(1, Some(&rhs_buffer), 0);
+            encoder.set_buffer(1, Some(&rhs_buffer.buffer), 0);
             encoder.set_buffer(2, Some(&partials), 0);
             encoder.set_buffer(3, Some(&resources.primes), 0);
             encoder.set_buffer(4, Some(&resources.limb_weights), 0);
             encoder.set_buffer(5, Some(&resources.field_moduli), 0);
             encoder.set_buffer(6, Some(&resources.fwd_twiddles), 0);
             set_inline_bytes(encoder, 7, &params);
-            encoder.set_threadgroup_memory_length(0, (ntt_size * size_of::<i32>()) as u64);
-            encoder.set_threadgroup_memory_length(1, (ntt_size * size_of::<i32>()) as u64);
             encoder.dispatch_thread_groups(
-                MTLSize::new(params.num_tiles * params.num_primes * num_rows as u64, 1, 1),
-                MTLSize::new((ntt_size / 2) as u64, 1, 1),
+                MTLSize::new(params.num_tiles * params.num_primes, 1, 1),
+                MTLSize::new(FP128_D512_LINEAR_RELATION_THREADS as u64, 1, 1),
             );
             encoder.end_encoding();
 
             let encoder = command.new_compute_command_encoder();
-            encoder.set_label("Akita linear relation reduction");
+            encoder.set_label("Akita D512 linear relation reduction");
             encoder.set_compute_pipeline_state(&self.fp128_d512_linear_relation_reduce_pipeline);
             encoder.set_buffer(0, Some(&partials), 0);
             encoder.set_buffer(1, Some(&residues), 0);
@@ -296,15 +265,14 @@ impl MetalRuntime {
             encoder.set_buffer(3, Some(&resources.inv_twiddles), 0);
             encoder.set_buffer(4, Some(&resources.d_inv), 0);
             set_inline_bytes(encoder, 5, &params);
-            encoder.set_threadgroup_memory_length(0, (ntt_size * size_of::<i32>()) as u64);
             encoder.dispatch_thread_groups(
-                MTLSize::new(params.num_primes * num_rows as u64, 1, 1),
-                MTLSize::new((ntt_size / 2) as u64, 1, 1),
+                MTLSize::new(params.num_primes, 1, 1),
+                MTLSize::new(FP128_D512_LINEAR_RELATION_THREADS as u64, 1, 1),
             );
             encoder.end_encoding();
 
             let encoder = command.new_compute_command_encoder();
-            encoder.set_label("Akita linear relation CRT reconstruction");
+            encoder.set_label("Akita D512 linear relation CRT reconstruction");
             encoder
                 .set_compute_pipeline_state(&self.fp128_d512_linear_relation_reconstruct_pipeline);
             encoder.set_buffer(0, Some(&residues), 0);
@@ -314,25 +282,27 @@ impl MetalRuntime {
             encoder.set_buffer(4, Some(&resources.field_partial_products), 0);
             set_inline_bytes(encoder, 5, &params);
             encoder.dispatch_thread_groups(
-                MTLSize::new(num_rows as u64, 1, 1),
-                MTLSize::new(D as u64, 1, 1),
+                MTLSize::new(1, 1, 1),
+                MTLSize::new(FP128_D512_LINEAR_RELATION_THREADS as u64, 1, 1),
             );
             encoder.end_encoding();
             let (command_wall, gpu) = complete_command(command)?;
 
             let readback_start = Instant::now();
-            // SAFETY: the shared output contains `num_rows * D` initialized fp128 limbs.
+            // SAFETY: the shared output contains exactly 512 initialized fp128 limbs.
             let coefficients = unsafe {
-                std::slice::from_raw_parts(output.contents().cast::<Fp128Limbs>(), num_rows * D)
-                    .to_vec()
+                std::slice::from_raw_parts(output.contents().cast::<Fp128Limbs>(), 512).to_vec()
             };
             let readback_copy = readback_start.elapsed();
+            let rhs_bytes = size_of_val(rhs);
             let allocation_bytes = partial_bytes
                 .checked_add(residue_bytes)
                 .and_then(|bytes| bytes.checked_add(output_bytes))
-                .and_then(|bytes| bytes.checked_add(if rhs_zero_copy { 0 } else { rhs_bytes }))
+                .and_then(|bytes| {
+                    bytes.checked_add(if rhs_buffer.zero_copy { 0 } else { rhs_bytes })
+                })
                 .ok_or(MetalCommitError::ShapeOverflow(
-                    "linear relation allocation bytes",
+                    "D512 relation allocation bytes",
                 ))?;
             Ok(D512LinearRelationDispatchOutcome {
                 coefficients,

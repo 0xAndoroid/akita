@@ -4,11 +4,10 @@ use akita_prover::backend::RingSwitchRelationView;
 use akita_prover::compute::{
     RingSwitchRelationKernel, RingSwitchRelationPlan, RingSwitchRelationRows,
 };
-use akita_types::{balanced_signed_digit_abs_bound, MAX_I8_LOG_BASIS};
 
 use crate::field::{MetalField, F};
 use crate::runtime::{
-    DigitRowsParams, LinearRelationParams, FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL,
+    D512LinearRelationParams, DigitRowsParams, FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL,
 };
 use crate::{MetalBackend, MetalCommitError, MetalPreparedSetup};
 use std::time::Instant;
@@ -36,49 +35,23 @@ impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, 
         {
             return self.digit_relation_rows(prepared, source.e_hat, plan.n_d);
         }
-        let cyclic_digits = plan.n_b != 0 && plan.n_a == 0 && source.z_segment.is_empty();
-        let num_rows = if cyclic_digits { plan.n_b } else { plan.n_a };
-        let num_columns = if cyclic_digits {
-            source.t_hat.len()
-        } else {
-            source.z_segment.len()
-        };
-        let (rhs_abs_bound, digit_max) = if cyclic_digits {
-            let (min, max) = source
-                .t_hat
-                .iter()
-                .flatten()
-                .copied()
-                .fold((0i8, 0i8), |(min, max), digit| {
-                    (min.min(digit), max.max(digit))
-                });
-            (u64::from(min.unsigned_abs().max(max as u8)), max)
-        } else {
-            (
-                source
-                    .z_segment
-                    .iter()
-                    .flatten()
-                    .map(|v| v.unsigned_abs())
-                    .max()
-                    .map(u64::from)
-                    .unwrap_or(0)
-                    .max(u64::from(source.z_folded_centered_inf_norm)),
-                0,
-            )
-        };
-        let use_metal = ((D == 128 && cyclic_digits)
-            || (D == 512 && !cyclic_digits && num_rows == 1))
+        let rhs_abs_bound = source
+            .z_segment
+            .iter()
+            .flat_map(|row| row.iter())
+            .map(|value| u64::from(value.unsigned_abs()))
+            .max()
+            .unwrap_or(0)
+            .max(u64::from(source.z_folded_centered_inf_norm));
+        let use_metal = D == 512
             && plan.n_d == 0
+            && plan.n_b == 0
+            && plan.n_a == 1
             && source.e_hat.is_empty()
-            && (cyclic_digits || (plan.n_b == 0 && source.t_hat.is_empty()))
-            && (!cyclic_digits
-                || (plan.log_basis_outer <= MAX_I8_LOG_BASIS
-                    && balanced_signed_digit_abs_bound(plan.log_basis_outer).is_some_and(
-                        |bound| rhs_abs_bound <= bound && u64::from(digit_max as u8) < bound,
-                    )))
+            && source.t_hat.is_empty()
+            && !source.z_segment.is_empty()
             && self.runtime().is_some_and(|runtime| {
-                runtime.supports_fp128_linear_relation(D, num_rows, num_columns, rhs_abs_bound)
+                runtime.supports_fp128_d512_linear_relation(source.z_segment.len(), rhs_abs_bound)
             });
         if !use_metal {
             let work_units = plan
@@ -108,30 +81,19 @@ impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, 
         let runtime = self
             .runtime()
             .ok_or_else(|| MetalCommitError::DeviceUnavailable.into_akita())?;
-        prepared
-            .expanded
-            .shared_matrix
-            .ring_view_dyn(num_rows, num_columns, D)?;
-        let fields =
-            &prepared.expanded.shared_matrix.as_field_slice()[..num_rows * num_columns * D];
-        // F's canonical limb storage matches MSL AkitaFp128; field_storage_matches_device_limbs pins this.
-        let matrix = runtime
-            .shared_slice_buffer(fields)
-            .map_err(MetalCommitError::into_akita)?;
-        let num_tiles = num_columns.div_ceil(64);
+        let matrix = prepared.matrix(runtime, 512, 1, source.z_segment.len())?;
+        let num_tiles = source.z_segment.len().div_ceil(64);
         let outcome = runtime
-            .dispatch_fp128_linear_relation(
+            .dispatch_fp128_d512_linear_relation(
                 &matrix.buffer,
                 source.z_segment,
-                source.t_hat,
-                LinearRelationParams {
-                    num_columns: num_columns as u64,
+                D512LinearRelationParams {
+                    num_columns: source.z_segment.len() as u64,
                     columns_per_tile: 64,
                     num_tiles: num_tiles as u64,
                     num_primes: 6,
-                    ntt_size: (if cyclic_digits { D } else { 2 * D }) as u64,
-                    output_coefficients: (num_rows * D) as u64,
-                    cyclic_digits: u64::from(cyclic_digits),
+                    ntt_size: 1_024,
+                    output_coefficients: D as u64,
                     rhs_abs_bound,
                 },
             )
@@ -144,29 +106,22 @@ impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, 
             .map(|(index, value)| F::from_device(value, index))
             .collect::<Result<Vec<_>, _>>()
             .map_err(MetalCommitError::into_akita)?;
-        if coefficients.len() != num_rows * D {
+        if coefficients.len() != D {
             return Err(AkitaError::InvalidSize {
-                expected: num_rows * D,
+                expected: D,
                 actual: coefficients.len(),
             });
         }
-        let rows = coefficients
-            .chunks_exact(D)
-            .map(CyclotomicRing::from_slice)
-            .collect::<Vec<_>>();
+        let quotient = CyclotomicRing::from_slice(&coefficients);
         self.update_opening_metrics(|metrics| {
             metrics.command_wall_time += timings.command_wall;
             metrics.gpu_active_time += timings.gpu.unwrap_or_default();
-            metrics.buffer_setup_time += timings.buffer_setup;
+            metrics.buffer_setup_time += timings.buffer_setup + matrix.prepare_time;
             metrics.readback_time += timings.readback_copy;
             metrics.allocation_bytes = metrics
                 .allocation_bytes
                 .saturating_add(outcome.allocation_bytes)
-                .saturating_add(if matrix.zero_copy {
-                    0
-                } else {
-                    matrix.buffer.length() as usize
-                });
+                .saturating_add(matrix.bytes.saturating_mul(usize::from(!matrix.cache_hit)));
         })
         .map_err(MetalCommitError::into_akita)?;
         tracing::debug!(
@@ -180,16 +135,11 @@ impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, 
             elapsed_s = total_start.elapsed().as_secs_f64(),
             "completed Metal ring-switch relation route"
         );
-        let (b_cyclic, a_quotients) = if cyclic_digits {
-            (rows, Vec::new())
-        } else {
-            (Vec::new(), rows)
-        };
         Ok(RingSwitchRelationRows {
             d_negacyclic: Vec::new(),
             d_cyclic: Vec::new(),
-            b_cyclic,
-            a_quotients,
+            b_cyclic: Vec::new(),
+            a_quotients: vec![quotient],
         })
     }
 }
@@ -298,7 +248,6 @@ impl MetalBackend {
 mod tests {
     use akita_prover::{AkitaProverSetup, ComputeBackendSetup, CpuBackend};
     use akita_types::SetupMatrixCapacity;
-    use std::time::Duration;
 
     use super::*;
     use crate::MetalExecutionPolicy;
@@ -352,7 +301,7 @@ mod tests {
             assert_eq!(actual, expected);
             let metrics = metal.last_opening_metrics().unwrap().unwrap();
             assert_eq!(metrics.cpu_fallback_calls, 0);
-            assert!(metrics.gpu_active_time > Duration::ZERO);
+            assert!(metrics.gpu_active_time > std::time::Duration::ZERO);
         }
         let invalid = [[4i8; D]];
         let source = RingSwitchRelationView {
@@ -419,67 +368,6 @@ mod tests {
         assert_eq!(actual, expected);
         let metrics = metal.last_opening_metrics().unwrap().unwrap();
         assert_eq!(metrics.cpu_fallback_calls, 0);
-        assert!(metrics.gpu_active_time > Duration::ZERO);
-    }
-    #[test]
-    fn d128_cyclic_relation_matches_cpu_across_rows_and_tiles() {
-        const D: usize = 128;
-        const COLUMNS: usize = 129;
-        const ROWS: usize = 3;
-        let setup = AkitaProverSetup::<F>::generate_with_capacity(
-            20,
-            1,
-            SetupMatrixCapacity {
-                num_field_elements: ROWS * COLUMNS * D,
-            },
-        )
-        .unwrap();
-        let cpu = CpuBackend::DEFAULT;
-        let cpu_prepared = cpu.prepare_setup(&setup).unwrap();
-        let metal = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
-        let metal_prepared = metal.prepare_setup(&setup).unwrap();
-        let t = (0..COLUMNS)
-            .map(|col| std::array::from_fn(|i| ((i + col * 3) % 8) as i8 - 4))
-            .collect::<Vec<[i8; D]>>();
-        for columns in [1, 64, COLUMNS] {
-            let source = RingSwitchRelationView {
-                e_hat: &[],
-                t_hat: &t[..columns],
-                z_segment: &[],
-                z_folded_centered_inf_norm: 0,
-            };
-            let plan = RingSwitchRelationPlan {
-                n_d: 0,
-                n_b: ROWS,
-                n_a: 0,
-                log_basis_open: 3,
-                log_basis_outer: 3,
-            };
-            let expected = cpu.relation_rows(&cpu_prepared, source, plan).unwrap();
-            metal.begin_opening_metrics().unwrap();
-            let actual = metal.relation_rows(&metal_prepared, source, plan).unwrap();
-            assert_eq!(actual, expected, "columns={columns}");
-            let metrics = metal.last_opening_metrics().unwrap().unwrap();
-            assert_eq!(metrics.cpu_fallback_calls, 0);
-            assert!(metrics.gpu_active_time > Duration::ZERO);
-        }
-        for (log_basis_outer, digit) in [(3, 4i8), (3, 5), (3, -5), (0, 0), (9, 0)] {
-            let digits = [[digit; D]];
-            let source = RingSwitchRelationView {
-                e_hat: &[],
-                t_hat: &digits,
-                z_segment: &[],
-                z_folded_centered_inf_norm: 0,
-            };
-            let plan = RingSwitchRelationPlan {
-                n_d: 0,
-                n_b: 1,
-                n_a: 0,
-                log_basis_open: 3,
-                log_basis_outer,
-            };
-            assert!(cpu.relation_rows(&cpu_prepared, source, plan).is_err());
-            assert!(metal.relation_rows(&metal_prepared, source, plan).is_err());
-        }
+        assert!(metrics.gpu_active_time > std::time::Duration::ZERO);
     }
 }

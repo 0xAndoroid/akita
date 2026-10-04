@@ -152,6 +152,7 @@ const FP128_DIRECT_RANGE_STORED_COEFFICIENTS: usize = 4;
 const FP128_DIRECT_RELATION_STORED_COEFFICIENTS: usize = 4;
 const FP128_DIRECT_RELATION_TWO_ROUND_PREFIX_OUTPUTS: usize = 16;
 const FP128_DIRECT_RELATION_PREFIX_LANES_PER_THREAD: usize = 2;
+const FP128_D512_LINEAR_RELATION_THREADS: usize = 512;
 const FP128_D512_LINEAR_RELATION_NTT_SIZE: usize = 1_024;
 const FP128_D512_LINEAR_RELATION_COLUMNS_PER_TILE: usize = 64;
 pub(crate) const FP128_D512_LINEAR_RELATION_NUM_PRIMES: usize = 6;
@@ -433,7 +434,7 @@ const _: [(); 64] = [(); size_of::<PackedCoefficientPackingIndexParams>()];
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct LinearRelationParams {
+pub(crate) struct D512LinearRelationParams {
     pub(crate) num_columns: u64,
     pub(crate) columns_per_tile: u64,
     pub(crate) num_tiles: u64,
@@ -441,10 +442,9 @@ pub(crate) struct LinearRelationParams {
     pub(crate) ntt_size: u64,
     pub(crate) output_coefficients: u64,
     pub(crate) rhs_abs_bound: u64,
-    pub(crate) cyclic_digits: u64,
 }
 
-const _: [(); 64] = [(); size_of::<LinearRelationParams>()];
+const _: [(); 56] = [(); size_of::<D512LinearRelationParams>()];
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

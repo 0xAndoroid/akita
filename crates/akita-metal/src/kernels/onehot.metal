@@ -172,7 +172,7 @@ struct PackedCoefficientPackingIndexParams {
     ulong offset_entries;
 };
 
-struct LinearRelationParams {
+struct D512LinearRelationParams {
     ulong num_columns;
     ulong columns_per_tile;
     ulong num_tiles;
@@ -180,7 +180,6 @@ struct LinearRelationParams {
     ulong ntt_size;
     ulong output_coefficients;
     ulong rhs_abs_bound;
-    ulong cyclic_digits;
 };
 
 struct RecursiveCommitParams {
@@ -1953,52 +1952,44 @@ kernel void akita_fp128_d512_indexed_subring64_decompose_fold(
 
 kernel void akita_fp128_d512_linear_relation_partials(
     device const AkitaFp128 *matrix [[buffer(0)]],
-    device const uchar *rhs [[buffer(1)]],
+    device const int *rhs [[buffer(1)]],
     device int *partials [[buffer(2)]],
     device const D512LinearNttPrime *primes [[buffer(3)]],
     device const int *limb_weights [[buffer(4)]],
     device const int *field_moduli [[buffer(5)]],
     device const int *fwd_twiddles [[buffer(6)]],
-    constant LinearRelationParams &params [[buffer(7)]],
-    threadgroup int *matrix_values [[threadgroup(0)]],
-    threadgroup int *rhs_values [[threadgroup(1)]],
+    constant D512LinearRelationParams &params [[buffer(7)]],
     uint thread_index [[thread_index_in_threadgroup]],
     uint3 threadgroup_index [[threadgroup_position_in_grid]])
 {
+    threadgroup int matrix_values[D512_LINEAR_NTT_SIZE];
+    threadgroup int rhs_values[D512_LINEAR_NTT_SIZE];
 
     ulong group = (ulong)threadgroup_index.x;
     uint prime_index = (uint)(group % params.num_primes);
-    ulong tile = (group / params.num_primes) % params.num_tiles;
-    ulong row = group / (params.num_primes * params.num_tiles);
-    uint half_ntt = (uint)(params.ntt_size / 2ul);
-    uint ring_d = params.cyclic_digits != 0ul ? (uint)params.ntt_size : half_ntt;
+    ulong tile = group / params.num_primes;
     ulong column_start = tile * params.columns_per_tile;
     ulong column_end = min(column_start + params.columns_per_tile, params.num_columns);
     D512LinearNttPrime prime = primes[prime_index];
-    ulong twiddle_base = (ulong)prime_index * D512_LINEAR_NTT_SIZE;
+    ulong twiddle_base = (ulong)prime_index * params.ntt_size;
     int accumulator_low = 0;
     int accumulator_high = 0;
 
     for (ulong column = column_start; column < column_end; ++column) {
-        for (uint part = 0u; part < 2u; ++part) {
-            uint index = thread_index + part * half_ntt;
-            int matrix_value = 0;
-            int rhs_value = 0;
-            if (index < ring_d) {
-                ulong source_index = column * ring_d + index;
-                matrix_value = d512_fp128_to_mont(
-                    matrix[row * params.num_columns * ring_d + source_index],
-                    prime_index, prime, limb_weights, field_moduli);
-                rhs_value = d512_i32_to_mont(params.cyclic_digits != 0ul
-                    ? (int)((device const char *)rhs)[source_index]
-                    : ((device const int *)rhs)[source_index], prime);
-            }
-            matrix_values[index] = matrix_value;
-            rhs_values[index] = rhs_value;
-        }
+        ulong coefficient = (ulong)thread_index;
+        ulong source_index = column * D512_LINEAR_NTT_HALF + coefficient;
+        matrix_values[thread_index] = d512_fp128_to_mont(
+            matrix[source_index],
+            prime_index,
+            prime,
+            limb_weights,
+            field_moduli);
+        matrix_values[thread_index + D512_LINEAR_NTT_HALF] = 0;
+        rhs_values[thread_index] = d512_i32_to_mont(rhs[source_index], prime);
+        rhs_values[thread_index + D512_LINEAR_NTT_HALF] = 0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint len = half_ntt; len != 0u; len >>= 1u) {
+        for (uint len = D512_LINEAR_NTT_HALF; len != 0u; len >>= 1u) {
             uint butterfly = thread_index;
             uint block = butterfly / len;
             uint offset = butterfly - block * len;
@@ -2033,15 +2024,15 @@ kernel void akita_fp128_d512_linear_relation_partials(
         accumulator_high = d512_ntt_add(
             accumulator_high,
             d512_ntt_mul(
-                matrix_values[thread_index + half_ntt],
-                rhs_values[thread_index + half_ntt],
+                matrix_values[thread_index + D512_LINEAR_NTT_HALF],
+                rhs_values[thread_index + D512_LINEAR_NTT_HALF],
                 prime),
             prime.p);
     }
 
     ulong partial_base = group * params.ntt_size;
     partials[partial_base + (ulong)thread_index] = accumulator_low;
-    partials[partial_base + (ulong)thread_index + half_ntt] = accumulator_high;
+    partials[partial_base + (ulong)thread_index + D512_LINEAR_NTT_HALF] = accumulator_high;
 }
 
 
@@ -2051,33 +2042,30 @@ kernel void akita_fp128_d512_linear_relation_reduce(
     device const D512LinearNttPrime *primes [[buffer(2)]],
     device const int *inv_twiddles [[buffer(3)]],
     device const int *d_inv [[buffer(4)]],
-    constant LinearRelationParams &params [[buffer(5)]],
-    threadgroup int *values [[threadgroup(0)]],
+    constant D512LinearRelationParams &params [[buffer(5)]],
     uint thread_index [[thread_index_in_threadgroup]],
     uint3 threadgroup_index [[threadgroup_position_in_grid]])
 {
+    threadgroup int values[D512_LINEAR_NTT_SIZE];
 
-    uint prime_index = (uint)((ulong)threadgroup_index.x % params.num_primes);
-    ulong row = (ulong)threadgroup_index.x / params.num_primes;
-    uint half_ntt = (uint)(params.ntt_size / 2ul);
-    uint ring_d = params.cyclic_digits != 0ul ? (uint)params.ntt_size : half_ntt;
+    uint prime_index = threadgroup_index.x;
     D512LinearNttPrime prime = primes[prime_index];
     int low = 0;
     int high = 0;
     for (ulong tile = 0ul; tile < params.num_tiles; ++tile) {
-        ulong base = ((row * params.num_tiles + tile) * params.num_primes + (ulong)prime_index) * params.ntt_size;
+        ulong base = (tile * params.num_primes + (ulong)prime_index) * params.ntt_size;
         low = d512_ntt_add(low, partials[base + (ulong)thread_index], prime.p);
         high = d512_ntt_add(
             high,
-            partials[base + (ulong)thread_index + half_ntt],
+            partials[base + (ulong)thread_index + D512_LINEAR_NTT_HALF],
             prime.p);
     }
     values[thread_index] = low;
-    values[thread_index + half_ntt] = high;
+    values[thread_index + D512_LINEAR_NTT_HALF] = high;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    ulong twiddle_base = (ulong)prime_index * D512_LINEAR_NTT_SIZE;
-    for (uint len = 1u; len < (uint)params.ntt_size; len <<= 1u) {
+    ulong twiddle_base = (ulong)prime_index * params.ntt_size;
+    for (uint len = 1u; len < D512_LINEAR_NTT_SIZE; len <<= 1u) {
         uint butterfly = thread_index;
         uint block = butterfly / len;
         uint offset = butterfly - block * len;
@@ -2091,18 +2079,17 @@ kernel void akita_fp128_d512_linear_relation_reduce(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    int scale = d512_ntt_reduce(
-        (long)d_inv[prime_index] * (long)(D512_LINEAR_NTT_SIZE / params.ntt_size), prime.p);
+    int scale = d_inv[prime_index];
     int scaled_low = d512_ntt_mul(values[thread_index], scale, prime);
     int scaled_high = d512_ntt_mul(
-        values[thread_index + half_ntt], scale, prime);
+        values[thread_index + D512_LINEAR_NTT_HALF], scale, prime);
     int canonical_low = d512_ntt_mul_raw(scaled_low, 1, prime);
     int canonical_high = d512_ntt_mul_raw(scaled_high, 1, prime);
     canonical_low = d512_ntt_reduce((long)canonical_low, prime.p);
     canonical_high = d512_ntt_reduce((long)canonical_high, prime.p);
-    ulong residue_base = (row * params.num_primes + (ulong)prime_index) * params.ntt_size;
+    ulong residue_base = (ulong)prime_index * params.ntt_size;
     residues[residue_base + (ulong)thread_index] = (uint)canonical_low;
-    residues[residue_base + (ulong)thread_index + half_ntt] =
+    residues[residue_base + (ulong)thread_index + D512_LINEAR_NTT_HALF] =
         (uint)canonical_high;
 }
 kernel void akita_fp128_d512_linear_relation_reconstruct(
@@ -2111,18 +2098,14 @@ kernel void akita_fp128_d512_linear_relation_reconstruct(
     device const D512LinearNttPrime *primes [[buffer(2)]],
     device const uint *garner_gamma [[buffer(3)]],
     device const AkitaFp128 *field_partial_products [[buffer(4)]],
-    constant LinearRelationParams &params [[buffer(5)]],
-    uint thread_index [[thread_index_in_threadgroup]],
-    uint3 threadgroup_index [[threadgroup_position_in_grid]])
+    constant D512LinearRelationParams &params [[buffer(5)]],
+    uint thread_index [[thread_index_in_threadgroup]])
 {
-    uint ring_d = (uint)(params.cyclic_digits != 0ul ? params.ntt_size : params.ntt_size / 2ul);
-    ulong row = (ulong)threadgroup_index.x;
     long digits[D512_LINEAR_NTT_PRIMES];
-    ulong coefficient = (params.cyclic_digits != 0ul ? 0ul : ring_d) + (ulong)thread_index;
+    ulong coefficient = D512_LINEAR_NTT_HALF + (ulong)thread_index;
     for (uint prime_index = 0u; prime_index < D512_LINEAR_NTT_PRIMES; ++prime_index) {
         long modulus = (long)primes[prime_index].p;
-        ulong base = (row * params.num_primes + (ulong)prime_index) * params.ntt_size;
-        long digit = (long)residues[base + coefficient];
+        long digit = (long)residues[(ulong)prime_index * params.ntt_size + coefficient];
         for (uint prior = 0u; prior < prime_index; ++prior) {
             digit = d512_positive_mod(digit - digits[prior], modulus);
             digit = (digit * (long)garner_gamma[prime_index * D512_LINEAR_NTT_PRIMES + prior])
@@ -2137,7 +2120,7 @@ kernel void akita_fp128_d512_linear_relation_reconstruct(
             reconstructed,
             akita_mul_signed_small(field_partial_products[prime_index], digits[prime_index]));
     }
-    output[row * ring_d + (ulong)thread_index] = reconstructed;
+    output[thread_index] = reconstructed;
 }
 
 kernel void akita_fp128_recursive_commit_matrix_ntt(

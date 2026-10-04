@@ -286,43 +286,31 @@ impl MetalRuntime {
                 >= FP128_D64_DIGIT_ROWS_THREADS as u64
     }
 
-    pub(crate) fn supports_fp128_linear_relation(
+    pub(crate) fn supports_fp128_d512_linear_relation(
         &self,
-        ring_d: usize,
-        num_rows: usize,
         num_columns: usize,
         rhs_abs_bound: u64,
     ) -> bool {
-        if !matches!(ring_d, 128 | 512)
-            || num_rows == 0
-            || num_columns == 0
-            || rhs_abs_bound >= FP128_D512_LINEAR_RELATION_RAW_PRIMES[0] as u64
-        {
+        if num_columns == 0 || rhs_abs_bound >= FP128_D512_LINEAR_RELATION_RAW_PRIMES[0] as u64 {
             return false;
         }
         let capacity = CrtCapacity::from_prime_moduli(
             FP128_D512_LINEAR_RELATION_RAW_PRIMES.map(|prime| prime as u128),
         );
         let field_modulus = (-F::one()).to_canonical_u128() + 1;
-        if !capacity.supports_modulus(num_columns, ring_d, field_modulus, rhs_abs_bound) {
+        if !capacity.supports_modulus(num_columns, 512, field_modulus, rhs_abs_bound) {
             return false;
         }
         let num_tiles = num_columns.div_ceil(FP128_D512_LINEAR_RELATION_COLUMNS_PER_TILE);
         let matrix_bytes = num_columns
-            .checked_mul(ring_d)
-            .and_then(|n| n.checked_mul(num_rows))
+            .checked_mul(512)
             .and_then(|count| count.checked_mul(size_of::<Fp128Limbs>()));
         let rhs_bytes = num_columns
-            .checked_mul(ring_d)
-            .and_then(|n| n.checked_mul(num_rows))
+            .checked_mul(512)
             .and_then(|count| count.checked_mul(size_of::<i32>()));
         let partial_bytes = num_tiles
             .checked_mul(FP128_D512_LINEAR_RELATION_NUM_PRIMES)
-            .and_then(|count| {
-                count
-                    .checked_mul(2 * ring_d)
-                    .and_then(|n| n.checked_mul(num_rows))
-            })
+            .and_then(|count| count.checked_mul(FP128_D512_LINEAR_RELATION_NTT_SIZE))
             .and_then(|count| count.checked_mul(size_of::<i32>()));
         [matrix_bytes, rhs_bytes, partial_bytes]
             .into_iter()
@@ -332,21 +320,20 @@ impl MetalRuntime {
                 })
             })
             && num_tiles
-                .checked_mul(num_rows)
-                .and_then(|n| n.checked_mul(FP128_D512_LINEAR_RELATION_NUM_PRIMES))
+                .checked_mul(FP128_D512_LINEAR_RELATION_NUM_PRIMES)
                 .is_some_and(|groups| groups <= u32::MAX as usize)
             && self
                 .fp128_d512_linear_relation_partials_pipeline
                 .max_total_threads_per_threadgroup()
-                >= ring_d as u64
+                >= FP128_D512_LINEAR_RELATION_THREADS as u64
             && self
                 .fp128_d512_linear_relation_reduce_pipeline
                 .max_total_threads_per_threadgroup()
-                >= ring_d as u64
+                >= FP128_D512_LINEAR_RELATION_THREADS as u64
             && self
                 .fp128_d512_linear_relation_reconstruct_pipeline
                 .max_total_threads_per_threadgroup()
-                >= ring_d as u64
+                >= FP128_D512_LINEAR_RELATION_THREADS as u64
     }
 
     pub(super) fn recursive_commit_resources(
