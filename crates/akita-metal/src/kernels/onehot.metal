@@ -981,10 +981,11 @@ kernel void akita_fp128_packed_onehot_coefficient_packing_partials(
 {
     threadgroup atomic_int bucket_digits[256 * 8];
     ulong group = (ulong)threadgroup_index.x;
-    ulong block = group / params.row_partials_per_block;
-    ulong row_partial = group - block * params.row_partials_per_block;
-    ulong column = block / params.blocks_per_column;
-    ulong block_in_column = block - column * params.blocks_per_column;
+    ulong column = group % params.column_capacity;
+    ulong column_partial = group / params.column_capacity;
+    ulong block_in_column = column_partial / params.row_partials_per_block;
+    ulong row_partial = column_partial - block_in_column * params.row_partials_per_block;
+    ulong block = column * params.blocks_per_column + block_in_column;
     ulong row_block_start = block_in_column * params.rows_per_block;
     ulong row_block_end = min(row_block_start + params.rows_per_block, params.num_rows);
     ulong row_start = row_block_start + row_partial * params.rows_per_partial;
