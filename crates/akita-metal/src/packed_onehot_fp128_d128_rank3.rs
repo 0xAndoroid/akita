@@ -280,7 +280,7 @@ mod tests {
         live_columns: usize,
         zero_suffix_start: Option<usize>,
     ) {
-        const ZERO_COLUMN_MASK: u64 = 0b0_1010;
+        let zero_column_mask: u64 = 0b0_1010 | 1 << (live_columns - 1);
 
         let lanes = (0..rows * live_columns)
             .map(|index| {
@@ -305,7 +305,7 @@ mod tests {
                         None
                     } else {
                         let lane = lanes[row * live_columns + column];
-                        let committed_zero = ZERO_COLUMN_MASK & (1u64 << column) != 0
+                        let committed_zero = zero_column_mask & (1u64 << column) != 0
                             && active_zero_rows[row / u64::BITS as usize]
                                 & (1u64 << (row % u64::BITS as usize))
                                 != 0;
@@ -353,7 +353,7 @@ mod tests {
                 live_columns,
                 &lanes,
                 &active_zero_rows,
-                ZERO_COLUMN_MASK,
+                zero_column_mask,
                 hot_entries,
                 zero_suffix_start,
             )
@@ -364,7 +364,7 @@ mod tests {
                 live_columns,
                 &lanes,
                 &active_zero_rows,
-                ZERO_COLUMN_MASK,
+                zero_column_mask,
             )
             .unwrap(),
         };
@@ -407,6 +407,11 @@ mod tests {
     #[test]
     fn parity_d128_rank3_k256_log42_block_geometry() {
         assert_rank3_parity(1 << 19, 1 << 20, 5, None);
+    }
+
+    #[test]
+    fn parity_d128_rank3_k256_two_commands_mid_block() {
+        assert_rank3_parity(1 << 14, 1 << 8, 29, Some(93 << 7));
     }
 
     #[test]
