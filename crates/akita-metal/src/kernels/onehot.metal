@@ -4817,33 +4817,52 @@ inline void akita_fp128_d128_rank3_accumulate_task_tile(
     device const ulong *active_zero_rows,
     constant PackedOneHotCommitParams &params,
     ulong tile_row_base,
-    uint task_column,
+    bool commit_zero,
     uint simd_lane)
 {
     uint local_hot = 0u;
     bool local_selected = false;
     if (simd_lane < PACKED_FP128_D128_RANK3_ROWS_PER_TILE) {
         ulong trace_row = tile_row_base + (ulong)simd_lane;
-        local_hot = (uint)lanes[
-            (trace_row - params.lane_row_offset) * params.lane_stride + (ulong)task_column];
+        local_hot = (uint)lanes[simd_lane * (uint)params.lane_stride];
         local_selected = local_hot != 0u;
-        if (!local_selected
-            && ((params.zero_column_mask >> task_column) & 1ul) != 0ul) {
+        if (!local_selected && commit_zero) {
             ulong active_word = active_zero_rows[trace_row >> 6ul];
             local_selected = ((active_word >> (trace_row & 63ul)) & 1ul) != 0ul;
         }
     }
-    uint selected = uint(simd_ballot(local_selected).operator unsigned long());
     uint4 coefficients = uint4(simd_lane, simd_lane + 32u, simd_lane + 64u, simd_lane + 96u);
-    while (selected != 0u) {
-        uint selected_lane = ctz(selected);
-        uint selected_hot = simd_shuffle(local_hot, selected_lane);
-        uint local_position = 2u * selected_lane + (selected_hot >> 7u);
+    if (simd_shuffle(uint(local_selected), 0u) != 0u) {
+        uint selected_hot = simd_shuffle(local_hot, 0u);
+        uint local_position = selected_hot >> 7u;
         uint4 shift = uint4(selected_hot & 127u);
         akita_radix26_accumulate(
             accumulator, shared_matrix, local_position * PACKED_FP128_D128_RANK3_D,
             (coefficients - shift) & uint4(127u), coefficients >= shift);
-        selected &= selected - 1u;
+    }
+    if (simd_shuffle(uint(local_selected), 1u) != 0u) {
+        uint selected_hot = simd_shuffle(local_hot, 1u);
+        uint local_position = 2u + (selected_hot >> 7u);
+        uint4 shift = uint4(selected_hot & 127u);
+        akita_radix26_accumulate(
+            accumulator, shared_matrix, local_position * PACKED_FP128_D128_RANK3_D,
+            (coefficients - shift) & uint4(127u), coefficients >= shift);
+    }
+    if (simd_shuffle(uint(local_selected), 2u) != 0u) {
+        uint selected_hot = simd_shuffle(local_hot, 2u);
+        uint local_position = 4u + (selected_hot >> 7u);
+        uint4 shift = uint4(selected_hot & 127u);
+        akita_radix26_accumulate(
+            accumulator, shared_matrix, local_position * PACKED_FP128_D128_RANK3_D,
+            (coefficients - shift) & uint4(127u), coefficients >= shift);
+    }
+    if (simd_shuffle(uint(local_selected), 3u) != 0u) {
+        uint selected_hot = simd_shuffle(local_hot, 3u);
+        uint local_position = 6u + (selected_hot >> 7u);
+        uint4 shift = uint4(selected_hot & 127u);
+        akita_radix26_accumulate(
+            accumulator, shared_matrix, local_position * PACKED_FP128_D128_RANK3_D,
+            (coefficients - shift) & uint4(127u), coefficients >= shift);
     }
 }
 
@@ -4889,6 +4908,8 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
 
     constexpr uint tasks_per_stream = PACKED_FP128_D128_RANK3_TASKS_PER_STREAM;
     constexpr uint threads_per_threadgroup = 512u;
+    static_assert(2u * threads_per_threadgroup == PACKED_FP128_D128_RANK3_TILE_ELEMENTS,
+        "each rank-3 thread loads two tile elements");
     uint num_tasks = (uint)params.dispatch_tasks;
     uint streams = (num_tasks + tasks_per_stream - 1u) / tasks_per_stream;
     uint simd_lane = thread_index & 31u;
@@ -4911,40 +4932,48 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
     uint global_1 = global_0 + 1u;
     uint block_0 = global_0 / live_columns;
     uint column_0 = global_0 % live_columns;
+    bool commit_zero_0 = ((params.zero_column_mask >> column_0) & 1ul) != 0ul;
     uint block_1 = global_1 / live_columns;
     uint column_1 = global_1 % live_columns;
+    bool commit_zero_1 = ((params.zero_column_mask >> column_1) & 1ul) != 0ul;
     ulong matrix_cursor =
         ((ulong)element * params.positions_per_block + (ulong)partial_start)
         * (ulong)PACKED_FP128_D128_RANK3_D;
 
+    ulong lane_cursor_0 =
+        ((ulong)block_0 * rows_per_block + (ulong)partial_start / 2ul - params.lane_row_offset)
+        * params.lane_stride + (ulong)column_0;
+    ulong lane_cursor_1 =
+        ((ulong)block_1 * rows_per_block + (ulong)partial_start / 2ul - params.lane_row_offset)
+        * params.lane_stride + (ulong)column_1;
     AkitaRadix26Accumulator accumulator_0 = akita_radix26_zero();
     AkitaRadix26Accumulator accumulator_1 = akita_radix26_zero();
 
     uint tile_count = positions_per_partial / PACKED_FP128_D128_RANK3_TILE_POSITIONS;
     for (uint tile = 0u; tile < tile_count; ++tile) {
-        for (uint shared_index = thread_index;
-             shared_index < PACKED_FP128_D128_RANK3_TILE_ELEMENTS;
-             shared_index += threads_per_threadgroup) {
-            shared_matrix[shared_index] = matrix[matrix_cursor + (ulong)shared_index];
-        }
+        shared_matrix[thread_index] = matrix[matrix_cursor + (ulong)thread_index];
+        shared_matrix[threads_per_threadgroup + thread_index] =
+            matrix[matrix_cursor + (ulong)threads_per_threadgroup + (ulong)thread_index];
         threadgroup_barrier(mem_flags::mem_threadgroup);
         ulong tile_rows = (ulong)partial_start / 2ul
             + (ulong)tile * (ulong)PACKED_FP128_D128_RANK3_ROWS_PER_TILE;
         if (active_0) {
             akita_fp128_d128_rank3_accumulate_task_tile(
-                accumulator_0, shared_matrix, lanes, active_zero_rows, params,
-                (ulong)block_0 * rows_per_block + tile_rows, column_0, simd_lane);
+                accumulator_0, shared_matrix, lanes + lane_cursor_0, active_zero_rows, params,
+                (ulong)block_0 * rows_per_block + tile_rows, commit_zero_0, simd_lane);
         }
         if (active_1) {
             akita_fp128_d128_rank3_accumulate_task_tile(
-                accumulator_1, shared_matrix, lanes, active_zero_rows, params,
-                (ulong)block_1 * rows_per_block + tile_rows, column_1, simd_lane);
+                accumulator_1, shared_matrix, lanes + lane_cursor_1, active_zero_rows, params,
+                (ulong)block_1 * rows_per_block + tile_rows, commit_zero_1, simd_lane);
         }
         if ((tile & 3u) == 3u) {
             if (active_0) akita_radix26_normalize(accumulator_0);
             if (active_1) akita_radix26_normalize(accumulator_1);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        lane_cursor_0 += PACKED_FP128_D128_RANK3_ROWS_PER_TILE * (uint)params.lane_stride;
+        lane_cursor_1 += PACKED_FP128_D128_RANK3_ROWS_PER_TILE * (uint)params.lane_stride;
         matrix_cursor += (ulong)PACKED_FP128_D128_RANK3_TILE_ELEMENTS;
     }
 
