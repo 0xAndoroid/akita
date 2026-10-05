@@ -123,9 +123,10 @@ const FP128_D512_THREADS: usize = 1_024;
 const PACKED_ONEHOT_BUFFER_ALIGNMENT: usize = 16 * 1024;
 pub(crate) const FP128_D512_TASKS_PER_STREAM: usize = 32;
 pub(crate) const FP128_D512_POSITION_PARTIALS: usize = 16;
-pub(crate) const FP128_D128_RANK3_TASKS_PER_STREAM: usize = 64;
+const FP128_D128_RANK3_THREADS: usize = 512;
+pub(crate) const FP128_D128_RANK3_TASKS_PER_STREAM: usize = 32;
 pub(crate) const FP128_D128_RANK3_POSITION_PARTIAL_ALIGNMENT: usize = 16;
-const FP128_D128_RANK3_THREADGROUP_BYTES: usize = 5 * 1_024 * size_of::<u32>();
+const FP128_D128_RANK3_THREADGROUP_BYTES: usize = 1_024 * size_of::<Fp128Limbs>();
 const FP128_D128_RANK3_RING_D: u64 = 128;
 const FP128_D128_RANK3_INNER_RANK: u64 = 3;
 const FP128_D512_TILE_FIELD_ELEMENTS: usize = 2_048;
@@ -1211,7 +1212,7 @@ impl MetalRuntime {
     pub(crate) fn supports_packed_fp128_d128_rank3(&self) -> bool {
         self.packed_fp128_d128_rank3_pipeline
             .max_total_threads_per_threadgroup()
-            >= FP128_D512_THREADS as u64
+            >= FP128_D128_RANK3_THREADS as u64
             && self
                 .packed_fp128_d128_rank3_pipeline
                 .static_threadgroup_memory_length()

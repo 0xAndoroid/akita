@@ -47,9 +47,9 @@ pub(crate) struct ValidatedShape {
 
 fn streams_per_command(num_positions: usize) -> usize {
     if num_positions >= LARGE_BLOCK_POSITIONS {
-        8
+        16
     } else {
-        32
+        64
     }
 }
 

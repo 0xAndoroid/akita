@@ -4705,27 +4705,19 @@ kernel void akita_onehot_commit_gather(
     output[output_index] = accumulator;
 }
 
-// Packed fp128 D128 rank-3 root commitment.
-//
-// Mapping for K = 256, D = 128: local field = row * 256 + lane, position =
-// field / 128 (one trace row spans two ring positions), shift = field mod 128.
-// Every hot entry adds the negacyclic rotation of one 128-coefficient row of
-// each of the n_a = 3 matrix elements into the (column, block, element)
-// accumulator. A threadgroup owns one matrix element: it streams that
-// element's rows for eight positions per 20 KiB tile, decoding radix26 digits
-// once for all tasks sharing the tile. Each SIMD group accumulates two tasks
-// with four coefficients per lane.
+// Tile storage and thread count match the rank-3 resource checks in
+// runtime.rs and the dispatch grid in runtime/commit.rs.
 #define PACKED_FP128_D128_RANK3_D 128u
 #define PACKED_FP128_D128_RANK3_TILE_POSITIONS 8u
 #define PACKED_FP128_D128_RANK3_ROWS_PER_TILE 4u
 #define PACKED_FP128_D128_RANK3_TILE_ELEMENTS 1024u
 #define PACKED_FP128_D128_RANK3_TASKS_PER_SIMDGROUP 2u
-#define PACKED_FP128_D128_RANK3_TASKS_PER_STREAM 64u
+#define PACKED_FP128_D128_RANK3_TASKS_PER_STREAM 32u
 
 static_assert(
     PACKED_FP128_D128_RANK3_TILE_POSITIONS * PACKED_FP128_D128_RANK3_D
         == PACKED_FP128_D128_RANK3_TILE_ELEMENTS,
-    "D128 rank-3 decoded tile plane geometry");
+    "D128 rank-3 tile geometry");
 static_assert(PACKED_FP128_D128_RANK3_ROWS_PER_TILE * 4u == 16u,
     "four tiles must contain at most sixteen selected contributions");
 static_assert(16u % PACKED_FP128_D128_RANK3_TILE_POSITIONS == 0u,
@@ -4772,27 +4764,28 @@ inline void akita_radix26_normalize(thread AkitaRadix26Accumulator &accumulator)
     accumulator.d1 += high * int4(64);
 }
 
-inline int4 akita_radix26_gather(
-    threadgroup const uint *matrix, uint digit, uint matrix_base, uint4 sources)
-{
-    uint base = digit * PACKED_FP128_D128_RANK3_TILE_ELEMENTS + matrix_base;
-    return int4(matrix[base + sources[0]], matrix[base + sources[1]],
-        matrix[base + sources[2]], matrix[base + sources[3]]);
-}
-
 inline void akita_radix26_accumulate(
     thread AkitaRadix26Accumulator &accumulator,
-    threadgroup const uint *matrix,
+    threadgroup const AkitaFp128 *matrix,
     uint matrix_base,
     uint4 sources,
     bool4 positive)
 {
+    AkitaFp128 a = matrix[matrix_base + sources.x];
+    AkitaFp128 b = matrix[matrix_base + sources.y];
+    AkitaFp128 c = matrix[matrix_base + sources.z];
+    AkitaFp128 d = matrix[matrix_base + sources.w];
+    uint4 w0(a.limb[0], b.limb[0], c.limb[0], d.limb[0]);
+    uint4 w1(a.limb[1], b.limb[1], c.limb[1], d.limb[1]);
+    uint4 w2(a.limb[2], b.limb[2], c.limb[2], d.limb[2]);
+    uint4 w3(a.limb[3], b.limb[3], c.limb[3], d.limb[3]);
+    constexpr uint mask = (1u << 26u) - 1u;
     int4 sign = select(int4(-1), int4(1), positive);
-    accumulator.d0 += sign * akita_radix26_gather(matrix, 0u, matrix_base, sources);
-    accumulator.d1 += sign * akita_radix26_gather(matrix, 1u, matrix_base, sources);
-    accumulator.d2 += sign * akita_radix26_gather(matrix, 2u, matrix_base, sources);
-    accumulator.d3 += sign * akita_radix26_gather(matrix, 3u, matrix_base, sources);
-    accumulator.d4 += sign * akita_radix26_gather(matrix, 4u, matrix_base, sources);
+    accumulator.d0 += sign * int4(w0 & mask);
+    accumulator.d1 += sign * int4(((w0 >> 26u) | (w1 << 6u)) & mask);
+    accumulator.d2 += sign * int4(((w1 >> 20u) | (w2 << 12u)) & mask);
+    accumulator.d3 += sign * int4(((w2 >> 14u) | (w3 << 18u)) & mask);
+    accumulator.d4 += sign * int4(w3 >> 8u);
 }
 
 inline AkitaFp128 akita_reduce_radix26(AkitaRadix26Accumulator accumulator, uint component) {
@@ -4819,7 +4812,7 @@ inline AkitaFp128 akita_reduce_radix26(AkitaRadix26Accumulator accumulator, uint
 
 inline void akita_fp128_d128_rank3_accumulate_task_tile(
     thread AkitaRadix26Accumulator &accumulator,
-    threadgroup const uint *shared_matrix,
+    threadgroup const AkitaFp128 *shared_matrix,
     device const uchar *lanes,
     device const ulong *active_zero_rows,
     constant PackedOneHotCommitParams &params,
@@ -4892,10 +4885,10 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
     uint thread_index [[thread_index_in_threadgroup]],
     uint3 threadgroup_index [[threadgroup_position_in_grid]])
 {
-    threadgroup uint shared_matrix[PACKED_FP128_D128_RANK3_TILE_ELEMENTS * 5];
+    threadgroup AkitaFp128 shared_matrix[PACKED_FP128_D128_RANK3_TILE_ELEMENTS];
 
     constexpr uint tasks_per_stream = PACKED_FP128_D128_RANK3_TASKS_PER_STREAM;
-    constexpr uint threads_per_threadgroup = 1024u;
+    constexpr uint threads_per_threadgroup = 512u;
     uint num_tasks = (uint)params.dispatch_tasks;
     uint streams = (num_tasks + tasks_per_stream - 1u) / tasks_per_stream;
     uint simd_lane = thread_index & 31u;
@@ -4932,17 +4925,7 @@ kernel void akita_packed_onehot_commit_fp128_d128_rank3(
         for (uint shared_index = thread_index;
              shared_index < PACKED_FP128_D128_RANK3_TILE_ELEMENTS;
              shared_index += threads_per_threadgroup) {
-            AkitaFp128 value = matrix[matrix_cursor + (ulong)shared_index];
-            constexpr uint mask = (1u << 26u) - 1u;
-            shared_matrix[shared_index] = value.limb[0] & mask;
-            shared_matrix[PACKED_FP128_D128_RANK3_TILE_ELEMENTS + shared_index] =
-                ((value.limb[0] >> 26u) | (value.limb[1] << 6u)) & mask;
-            shared_matrix[PACKED_FP128_D128_RANK3_TILE_ELEMENTS * 2u + shared_index] =
-                ((value.limb[1] >> 20u) | (value.limb[2] << 12u)) & mask;
-            shared_matrix[PACKED_FP128_D128_RANK3_TILE_ELEMENTS * 3u + shared_index] =
-                ((value.limb[2] >> 14u) | (value.limb[3] << 18u)) & mask;
-            shared_matrix[PACKED_FP128_D128_RANK3_TILE_ELEMENTS * 4u + shared_index] =
-                value.limb[3] >> 8u;
+            shared_matrix[shared_index] = matrix[matrix_cursor + (ulong)shared_index];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         ulong tile_rows = (ulong)partial_start / 2ul

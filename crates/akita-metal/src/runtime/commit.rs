@@ -523,7 +523,7 @@ impl MetalRuntime {
                     set_inline_bytes(encoder, 5, &half);
                     encoder.dispatch_thread_groups(
                         MTLSize::new(command_threadgroups, 1, 1),
-                        MTLSize::new(FP128_D512_THREADS as u64, 1, 1),
+                        MTLSize::new(FP128_D128_RANK3_THREADS as u64, 1, 1),
                     );
                 }
                 encoder.end_encoding();
