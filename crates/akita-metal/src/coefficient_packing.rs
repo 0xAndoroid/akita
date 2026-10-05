@@ -181,12 +181,16 @@ mod tests {
 
     #[test]
     fn packed_coefficient_packing_preserves_selected_row_zero() {
-        const D: usize = 512;
-        const ROWS: usize = 256;
+        check_packed_coefficient_packing::<128>();
+        check_packed_coefficient_packing::<512>();
+    }
+
+    fn check_packed_coefficient_packing<const D: usize>() {
+        const ROWS: usize = 1 << 16;
         const LIVE_COLUMNS: usize = 2;
         const COLUMN_CAPACITY: usize = 4;
         const K: usize = 256;
-        const POSITIONS_PER_BLOCK: usize = 64;
+        const POSITIONS_PER_BLOCK: usize = 1 << 15;
         const ZERO_COLUMN_MASK: u64 = 0b01;
 
         let mut lanes = (0..ROWS * LIVE_COLUMNS)

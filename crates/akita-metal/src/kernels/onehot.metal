@@ -981,11 +981,13 @@ kernel void akita_fp128_packed_onehot_coefficient_packing_partials(
     uint3 threadgroup_index [[threadgroup_position_in_grid]])
 {
     threadgroup atomic_int bucket_digits[256 * 8];
+    // PackedOneHotCommitView and the prepared packing geometry enforce power-of-two
+    // dimensions; row partials use the fixed 32768-row accumulator bound.
     ulong group = (ulong)threadgroup_index.x;
-    ulong column = group % params.column_capacity;
-    ulong column_partial = group / params.column_capacity;
-    ulong block_in_column = column_partial / params.row_partials_per_block;
-    ulong row_partial = column_partial - block_in_column * params.row_partials_per_block;
+    ulong column = group & (params.column_capacity - 1ul);
+    ulong column_partial = group >> ctz(params.column_capacity);
+    ulong block_in_column = column_partial >> ctz(params.row_partials_per_block);
+    ulong row_partial = column_partial & (params.row_partials_per_block - 1ul);
     ulong block = column * params.blocks_per_column + block_in_column;
     ulong row_block_start = block_in_column * params.rows_per_block;
     ulong row_block_end = min(row_block_start + params.rows_per_block, params.num_rows);
@@ -1015,14 +1017,14 @@ kernel void akita_fp128_packed_onehot_coefficient_packing_partials(
             }
             ulong field_in_block =
                 (row - row_block_start) * params.onehot_k + (ulong)hot;
-            ulong position = field_in_block / params.ring_d;
-            ulong coefficient = field_in_block - position * params.ring_d;
-            ulong bucket = coefficient / params.stride;
+            ulong position = field_in_block >> ctz(params.ring_d);
+            ulong coefficient = field_in_block & (params.ring_d - 1ul);
+            ulong bucket = coefficient >> ctz(params.stride);
             if (position >= params.positions_per_block
                 || bucket >= params.subring_dimension) {
                 continue;
             }
-            ulong low = coefficient - bucket * params.stride;
+            ulong low = coefficient & (params.stride - 1ul);
             AkitaFp128 weight = combined_weights[position * params.stride + low];
             ulong bucket_base = bucket * 8ul;
             for (uint limb = 0u; limb < 4u; ++limb) {
