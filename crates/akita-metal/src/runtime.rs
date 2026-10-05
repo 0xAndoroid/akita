@@ -136,6 +136,15 @@ const FP128_D512_COEFFICIENT_BANDS: usize = 2;
 const FP128_D64_DIGIT_ROWS_THREADS: usize = 256;
 const FP128_D64_DIGIT_ROWS_PARTIAL_THREADS: usize = 64;
 pub(crate) const FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL: usize = 128;
+
+// Each i32 limb accumulator sums 64 * columns products of a 16-bit limb and a
+// signed digit. This keeps its absolute sum at most 128 * 64 * 4 * 65535 < 2^31.
+pub(crate) fn digit_rows_columns_per_partial(log_basis: u32) -> Option<usize> {
+    (1..=8)
+        .contains(&log_basis)
+        .then(|| FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL >> log_basis.saturating_sub(3))
+}
+
 const FP128_COEFFICIENT_PACKING_THREADS: usize = 256;
 pub(crate) const FP128_D512_PACKING_INDEX_TILE_POSITIONS: usize = 256;
 pub(crate) const FP128_D512_PACKING_INDEX_BUCKET_OFFSETS: usize = 33;
@@ -338,9 +347,10 @@ pub(crate) struct DigitRowsParams {
     pub(crate) columns_per_partial: u64,
     pub(crate) column_partials: u64,
     pub(crate) retain_quotients: u64,
+    pub(crate) cyclic: u64,
 }
 
-const _: [(); 64] = [(); size_of::<DigitRowsParams>()];
+const _: [(); 72] = [(); size_of::<DigitRowsParams>()];
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

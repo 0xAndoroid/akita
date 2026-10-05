@@ -99,6 +99,7 @@ struct DigitRowsParams {
     ulong columns_per_partial;
     ulong column_partials;
     ulong retain_quotients;
+    ulong cyclic;
 };
 
 struct I8CoefficientPackingParams {
@@ -820,7 +821,7 @@ kernel void akita_fp128_d64_digit_rows_partials(
             akita_wide_accumulate_scaled(
                 accumulator,
                 value,
-                wraps ? -digit : digit);
+                wraps && params.cyclic == 0ul ? -digit : digit);
             if (params.retain_quotients != 0ul && wraps) {
                 akita_wide_accumulate_scaled(quotient, value, digit);
             }

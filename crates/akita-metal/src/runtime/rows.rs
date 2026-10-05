@@ -6,9 +6,14 @@ impl MetalRuntime {
         matrix: &Buffer,
         digit_vectors: &[&[[i8; D]]],
         retain_quotients: bool,
+        log_basis: u32,
         params: DigitRowsParams,
     ) -> Result<DigitRowsDispatchOutcome, MetalCommitError> {
         autoreleasepool(|| {
+            let columns_per_partial =
+                digit_rows_columns_per_partial(log_basis).ok_or_else(|| {
+                    MetalCommitError::UnsupportedShape("digit basis must be in 1..=8".into())
+                })?;
             let expected_output = params
                 .num_vectors
                 .checked_mul(params.num_rows)
@@ -25,9 +30,7 @@ impl MetalRuntime {
                 .map_err(|_| MetalCommitError::ShapeOverflow("digit-row vector count"))?;
             let expected_row_count = usize::try_from(params.num_rows)
                 .map_err(|_| MetalCommitError::ShapeOverflow("digit-row row count"))?;
-            let expected_column_partials = params
-                .num_cols
-                .div_ceil(FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL as u64);
+            let expected_column_partials = params.num_cols.div_ceil(columns_per_partial as u64);
             let partial_count = params
                 .num_vectors
                 .checked_mul(params.num_rows)
@@ -43,6 +46,8 @@ impl MetalRuntime {
                 .ok_or(MetalCommitError::ShapeOverflow("digit-row matrix bytes"))?;
             if D != 64
                 || params.ring_d != 64
+                || params.cyclic > 1
+                || (params.cyclic != 0 && retain_quotients)
                 || params.num_vectors == 0
                 || params.num_rows == 0
                 || digit_vectors.len() != expected_vector_count
@@ -51,7 +56,7 @@ impl MetalRuntime {
                     .any(|digits| digits.len() != expected_vector_width)
                 || params.output_coefficients != expected_output
                 || params.retain_quotients != u64::from(retain_quotients)
-                || params.columns_per_partial != FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL as u64
+                || params.columns_per_partial != columns_per_partial as u64
                 || params.column_partials != expected_column_partials
                 || total_output > u64::from(u32::MAX)
                 || params
@@ -65,6 +70,7 @@ impl MetalRuntime {
                     expected_row_count,
                     expected_vector_width,
                     retain_quotients,
+                    log_basis,
                 )
             {
                 return Err(MetalCommitError::UnsupportedShape(

@@ -228,7 +228,11 @@ impl MetalRuntime {
         num_rows: usize,
         num_cols: usize,
         retain_quotients: bool,
+        log_basis: u32,
     ) -> bool {
+        let Some(columns_per_partial) = digit_rows_columns_per_partial(log_basis) else {
+            return false;
+        };
         let Ok(num_vectors) = u64::try_from(num_vectors) else {
             return false;
         };
@@ -246,7 +250,12 @@ impl MetalRuntime {
         {
             return false;
         }
-        let column_partials = num_cols.div_ceil(FP128_D64_DIGIT_ROWS_COLUMNS_PER_PARTIAL as u64);
+        let column_partials = num_cols.div_ceil(columns_per_partial as u64);
+        if column_partials.div_ceil(FP128_D64_DIGIT_ROWS_THREADS as u64)
+            > i32::MAX as u64 / u64::from(u16::MAX)
+        {
+            return false;
+        }
         let output_coefficients = num_vectors
             .checked_mul(num_rows)
             .and_then(|count| count.checked_mul(D as u64));
