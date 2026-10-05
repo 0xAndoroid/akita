@@ -44,11 +44,7 @@ const DIRECT_KERNEL_NAME: &str = "akita_onehot_commit_gather";
 const BLOCK_BATCHED_KERNEL_NAME: &str = "akita_onehot_commit_block_batched";
 const PACKED_FP128_D512_PANELS_KERNEL_NAME: &str = "akita_packed_onehot_commit_fp128_d512_panels";
 const PACKED_PARTIAL_REDUCTION_KERNEL_NAME: &str = "akita_packed_onehot_reduce_partials";
-const PACKED_FP128_D128_RANK3_KERNEL_NAME: &str = if commit::D128_RANK3_SLAB {
-    "akita_packed_onehot_commit_fp128_d128_rank3_slab"
-} else {
-    "akita_packed_onehot_commit_fp128_d128_rank3"
-};
+const PACKED_FP128_D128_RANK3_KERNEL_NAME: &str = "akita_packed_onehot_commit_fp128_d128_rank3";
 const FP128_D128_DECOMPOSE_FOLD_KERNEL_NAME: &str = "akita_fp128_d128_decompose_fold";
 const FP128_D128_SUBRING64_DECOMPOSE_FOLD_KERNEL_NAME: &str =
     "akita_fp128_d128_subring64_decompose_fold";
