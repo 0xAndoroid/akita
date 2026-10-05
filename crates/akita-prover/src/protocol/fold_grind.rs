@@ -16,6 +16,7 @@ use akita_types::{
 };
 #[cfg(test)]
 use akita_types::{OpeningFamily, OpeningMethod};
+use jolt_field::solinas::parallel::*;
 use jolt_field::Unreduced;
 use jolt_field::{CanonicalEncoding, Field, Ring};
 
@@ -400,18 +401,26 @@ where
     }
     let (nonce, mut candidate_outputs) =
         first_jointly_accepted_nonce(max_grind_attempts, |nonce| {
-            let mut candidate_outputs = Vec::with_capacity(groups.len());
-            {
+            let candidates = {
                 let mut preview = PreviewFoldDraw::new(transcript);
-                for prepared_group in groups {
+                groups
+                    .iter()
+                    .map(|prepared_group| {
+                        let group = &prepared_group.input;
+                        let challenges = draw_group_fold_challenges::<F, E, _>(
+                            &mut preview,
+                            &group.params,
+                            group.group_index,
+                            group.group.num_polynomials(),
+                            nonce,
+                        )?;
+                        Ok((prepared_group, challenges))
+                    })
+                    .collect::<Result<Vec<_>, AkitaError>>()?
+            };
+            let candidate_outputs = cfg_into_iter!(candidates)
+                .map(|(prepared_group, challenges)| {
                     let group = &prepared_group.input;
-                    let challenges = draw_group_fold_challenges::<F, E, _>(
-                        &mut preview,
-                        &group.params,
-                        group.group_index,
-                        group.group.num_polynomials(),
-                        nonce,
-                    )?;
                     let output =
                         group
                             .group
@@ -424,13 +433,12 @@ where
                             &output.coefficients,
                         )
                     };
-                    let Some(observed_l2_sq) = observed_l2_sq else {
-                        return Ok(None);
-                    };
-                    candidate_outputs.push((output, observed_l2_sq));
-                }
-            }
-            Ok(Some(candidate_outputs))
+                    Ok(observed_l2_sq.map(|observed| (output, observed)))
+                })
+                .collect::<Vec<Result<_, AkitaError>>>();
+            candidate_outputs
+                .into_iter()
+                .collect::<Result<Option<Vec<_>>, AkitaError>>()
         })?;
 
     transcript.commit_fold_response(akita_types::GrindingSite::FoldResponse { level }, nonce)?;

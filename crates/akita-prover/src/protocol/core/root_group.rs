@@ -37,7 +37,7 @@ pub(crate) trait RootProverGroupMeta<F: Field> {
     fn exact_integer_coeff_l2_sq(&self) -> Option<u128>;
 }
 
-pub(crate) trait RootProverGroupOpening<F, E, B>: RootProverGroupMeta<F>
+pub(crate) trait RootProverGroupOpening<F, E, B>: RootProverGroupMeta<F> + Sync
 where
     F: Field + CanonicalEncoding + akita_serialization::AkitaSerialize + Ring + Unreduced + 'static,
     <F as Unreduced>::Wide: From<F>,
