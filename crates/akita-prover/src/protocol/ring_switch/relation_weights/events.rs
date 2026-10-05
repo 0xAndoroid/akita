@@ -202,22 +202,20 @@ impl<E: Field> RelationWeightEvents<E> {
                     "relation event does not preserve the common alpha factor".into(),
                 ));
             }
-            for coefficient_offset in (0..coefficients.len()).step_by(coeff_count) {
-                let physical = coefficients.start + coefficient_offset;
-                if !physical.is_multiple_of(coeff_count) {
-                    return Err(AkitaError::InvalidSetup(
-                        "flat relation layout breaks relation lane alignment".into(),
-                    ));
-                }
-                let lane = physical / coeff_count;
-                let alpha_exponent = event.alpha_exponent_start() + coefficient_offset;
-                let alpha_power = *self
-                    .alpha_powers
-                    .get(alpha_exponent)
-                    .ok_or(AkitaError::InvalidProof)?;
-                *relation_lane_weights
-                    .get_mut(lane)
-                    .ok_or(AkitaError::InvalidProof)? += event.scalar() * alpha_power;
+            let weights = relation_lane_weights
+                .get_mut(coefficients.start / coeff_count..coefficients.end / coeff_count)
+                .ok_or(AkitaError::InvalidProof)?;
+            let alpha_start = event.alpha_exponent_start();
+            let powers = self
+                .alpha_powers
+                .get(alpha_start..alpha_start + coefficients.len())
+                .ok_or(AkitaError::InvalidProof)?;
+            for (weight, &power) in weights.iter_mut().zip(powers.iter().step_by(coeff_count)) {
+                *weight += if power == E::one() {
+                    event.scalar()
+                } else {
+                    event.scalar() * power
+                };
             }
         }
         let common_alpha_factor = self
