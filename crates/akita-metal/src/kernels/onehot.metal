@@ -840,7 +840,7 @@ kernel void akita_fp128_d64_digit_rows_partials(
     }
 }
 
-kernel void akita_fp128_d64_digit_rows_reduce(
+kernel void akita_fp128_relation_rows_reduce(
     device const AkitaFp128 *partials [[buffer(0)]],
     device AkitaFp128 *output [[buffer(1)]],
     constant DigitRowsParams &params [[buffer(2)]],
@@ -853,21 +853,22 @@ kernel void akita_fp128_d64_digit_rows_reduce(
     uint product = (uint)((ulong)output_index / params.output_coefficients);
     uint product_output_index =
         (uint)((ulong)output_index % params.output_coefficients);
-    uint outputs_per_vector = (uint)params.num_rows * 64u;
+    uint ring_d = (uint)params.ring_d;
+    uint outputs_per_vector = (uint)params.num_rows * ring_d;
     uint vector = product_output_index / outputs_per_vector;
     uint vector_local = product_output_index % outputs_per_vector;
-    uint row = vector_local >> 6u;
-    uint coefficient = vector_local & 63u;
+    uint row = vector_local / ring_d;
+    uint coefficient = vector_local % ring_d;
     AkitaWideAccumulator accumulator = akita_wide_zero();
     for (uint partial = thread_index;
          partial < (uint)params.column_partials;
          partial += 256u) {
         ulong partial_index =
             (((ulong)vector * params.num_rows + (ulong)row)
-                * params.column_partials + (ulong)partial) * 64ul
+                * params.column_partials + (ulong)partial) * params.ring_d
             + (ulong)coefficient;
         partial_index += (ulong)product
-            * params.num_vectors * params.num_rows * params.column_partials * 64ul;
+            * params.num_vectors * params.num_rows * params.column_partials * params.ring_d;
         akita_wide_accumulate(accumulator, partials[partial_index], true);
     }
     reduction[thread_index] = akita_reduce_wide(accumulator);

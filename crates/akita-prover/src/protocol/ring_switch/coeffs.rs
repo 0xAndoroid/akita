@@ -2,7 +2,10 @@ use super::*;
 use crate::backend::packed_digits::PackedSignedDigitWriter;
 #[cfg(feature = "response-model-diagnostics")]
 use crate::backend::packed_digits::PackedSignedDigits;
-use crate::compute::{OperationCtx, RuntimeRingSwitchProveBackend};
+use crate::backend::RingSwitchRelationView;
+use crate::compute::{
+    OperationCtx, RingSwitchProveBackend, RingSwitchRelationKernel, RuntimeRingSwitchProveBackend,
+};
 use crate::kernels::linear::decompose_commit_blocks_into;
 use crate::protocol::ring_relation::{
     validate_chunked_witness_cfg, CompressionSourceId, CompressionWitnessMaterialization,
@@ -205,12 +208,13 @@ fn trace_witness_source_moments(
 }
 
 /// Emit one physical `[Z | E | T]` ownership unit directly into packed storage.
-fn emit_witness_unit<F: Field + CanonicalEncoding>(
+fn emit_witness_unit<F: Field + CanonicalEncoding, B: RuntimeRingSwitchProveBackend<F>>(
     out: &mut PackedSignedDigitWriter,
     unit: &WitnessUnitLayout,
     group: &PreparedRingSwitchGroup<F>,
     num_claims: usize,
     expected_chunks: usize,
+    backend: &B,
 ) -> Result<(), AkitaError> {
     let num_digits_fold = group.params.num_digits_fold();
     {
@@ -220,7 +224,14 @@ fn emit_witness_unit<F: Field + CanonicalEncoding>(
             F,
             group.role_dims.d_a(),
             |D_G| {
-                emit_unit_z_segment::<D_G>(out, unit, group, num_digits_fold, expected_chunks)
+                emit_unit_z_segment::<F, B, D_G>(
+                    out,
+                    unit,
+                    group,
+                    num_digits_fold,
+                    expected_chunks,
+                    backend,
+                )
             }
         )?;
     }
@@ -298,12 +309,17 @@ fn emit_witness_unit<F: Field + CanonicalEncoding>(
     Ok(())
 }
 
-fn emit_unit_z_segment<const D: usize>(
+fn emit_unit_z_segment<
+    F: Field + CanonicalEncoding,
+    B: RingSwitchProveBackend<F, D>,
+    const D: usize,
+>(
     out: &mut PackedSignedDigitWriter,
     unit: &WitnessUnitLayout,
-    group: &PreparedRingSwitchGroup<impl Field + CanonicalEncoding>,
+    group: &PreparedRingSwitchGroup<F>,
     num_digits_fold: usize,
     expected_chunks: usize,
+    backend: &B,
 ) -> Result<(), AkitaError> {
     let z_centered = group.z_folded_coefficients.chunk(
         &group.z_centered,
@@ -312,7 +328,12 @@ fn emit_unit_z_segment<const D: usize>(
     )?;
     let z_planes = {
         let _span = tracing::info_span!("ring_switch_decompose_z_planes").entered();
-        decompose_z_folded_planes::<D>(z_centered, num_digits_fold, group.params.log_basis_open())?
+        RingSwitchRelationKernel::<RingSwitchRelationView<'_, D>, F, D>::decompose_z_planes(
+            backend,
+            z_centered,
+            num_digits_fold,
+            group.params.log_basis_open(),
+        )?
     };
     let expected_planes = group
         .params
@@ -597,12 +618,13 @@ where
             )
             .entered();
             let group_layout = opening_batch.group_layout(group_index)?;
-            emit_witness_unit::<F>(
+            emit_witness_unit::<F, B>(
                 &mut out,
                 unit,
                 &owned[group_index],
                 group_layout.num_polynomials(),
                 witness_layout.num_chunks_for_group(group_index),
+                ring_switch_ctx.backend(),
             )?;
         }
         Ok(out)
@@ -637,60 +659,6 @@ where
     #[cfg(feature = "response-model-diagnostics")]
     trace_witness_source_moments(&out, &witness_layout, lp);
     RecursiveWitnessFlat::from_witness_layout(out, &witness_layout, known_balanced_log_basis)
-}
-
-pub(super) fn balanced_decompose_centered_i32_i8_into<const D: usize>(
-    centered: &[i32; D],
-    out: &mut [[i8; D]],
-    log_basis: u32,
-) {
-    let levels = out.len();
-    assert!(
-        log_basis > 0 && log_basis <= 8,
-        "log_basis must be in 1..=8 for i8 output"
-    );
-    assert!(
-        (levels as u32).saturating_mul(log_basis) <= 128 + log_basis,
-        "levels * log_basis must be <= 128 + log_basis"
-    );
-
-    let half_b = 1i32 << (log_basis - 1);
-    let mask = (half_b << 1) - 1;
-    let mut carries = *centered;
-    for plane in out {
-        for (digit, value) in plane.iter_mut().zip(&mut carries) {
-            let raw = *value & mask;
-            let carry = i32::from(raw >= half_b);
-            *digit = (raw - (carry << log_basis)) as i8;
-            *value = (*value >> log_basis) + carry;
-        }
-    }
-}
-
-/// Decompose centered Z fold responses into `(position, commit_digit, fold_digit)` planes.
-fn decompose_z_folded_planes<const D: usize>(
-    z_folded_centered: &[i32],
-    num_digits_fold: usize,
-    log_basis: u32,
-) -> Result<Vec<[i8; D]>, AkitaError> {
-    let (rows, remainder) = z_folded_centered.as_chunks::<D>();
-    if !remainder.is_empty() {
-        return Err(AkitaError::InvalidSize {
-            expected: D,
-            actual: z_folded_centered.len(),
-        });
-    }
-    let plane_count = rows
-        .len()
-        .checked_mul(num_digits_fold)
-        .ok_or_else(|| AkitaError::InvalidSetup("Z plane count overflow".to_string()))?;
-    let mut all_planes = vec![[0i8; D]; plane_count];
-    cfg_iter!(rows)
-        .zip(cfg_chunks_mut!(&mut all_planes, num_digits_fold))
-        .for_each(|(z_j, planes)| {
-            balanced_decompose_centered_i32_i8_into(z_j, planes, log_basis);
-        });
-    Ok(all_planes)
 }
 
 fn emit_witness_tail<F: Field + CanonicalEncoding>(

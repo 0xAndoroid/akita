@@ -1,9 +1,9 @@
-use super::coeffs::balanced_decompose_centered_i32_i8_into;
 use super::coeffs::{
     quotient_decomposition_calls, reset_quotient_decomposition_calls, ring_switch_build_w,
 };
 use super::evals::build_w_evals_compact;
 use crate::backend::packed_digits::PackedSignedDigits;
+use crate::backend::poly_helpers::balanced_decompose_centered_i32_i8_into;
 use crate::compute::compression::{execute_compression_chains, CompressionExecutionInput};
 use crate::compute::{ComputeBackendSetup, CpuBackend, OperationCtx};
 use crate::protocol::ring_relation::{

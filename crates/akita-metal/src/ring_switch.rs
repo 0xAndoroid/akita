@@ -4,6 +4,8 @@ use akita_prover::backend::RingSwitchRelationView;
 use akita_prover::compute::{
     RingSwitchRelationKernel, RingSwitchRelationPlan, RingSwitchRelationRows,
 };
+use akita_prover::CpuBackend;
+use jolt_field::solinas::parallel::*;
 
 use crate::field::{MetalField, F};
 use crate::runtime::{digit_rows_columns_per_partial, D512LinearRelationParams, DigitRowsParams};
@@ -13,6 +15,40 @@ use std::time::Instant;
 impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, D>
     for MetalBackend
 {
+    fn decompose_z_planes(
+        &self,
+        centered: &[i32],
+        num_digits: usize,
+        log_basis: u32,
+    ) -> Result<Vec<[i8; D]>, AkitaError> {
+        if !matches!(D, 64 | 128) || centered.len() < (1 << 20) || self.runtime().is_none() {
+            return <CpuBackend as RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, D>>::decompose_z_planes(
+                &self.cpu_backend(), centered, num_digits, log_basis,
+            );
+        }
+        let _span = tracing::info_span!(
+            "MetalRingSwitch::decompose_z_planes",
+            ring_d = D,
+            coefficients = centered.len()
+        )
+        .entered();
+        let runtime = self
+            .runtime()
+            .ok_or_else(|| MetalCommitError::DeviceUnavailable.into_akita())?;
+        let (planes, timings, allocation_bytes) = runtime
+            .dispatch_centered_digit_planes::<D>(centered, num_digits, log_basis)
+            .map_err(MetalCommitError::into_akita)?;
+        self.update_opening_metrics(|metrics| {
+            metrics.command_wall_time += timings.command_wall;
+            metrics.gpu_active_time += timings.gpu.unwrap_or_default();
+            metrics.buffer_setup_time += timings.buffer_setup;
+            metrics.readback_time += timings.readback_copy;
+            metrics.allocation_bytes = metrics.allocation_bytes.saturating_add(allocation_bytes);
+        })
+        .map_err(MetalCommitError::into_akita)?;
+        Ok(planes)
+    }
+
     fn relation_rows(
         &self,
         prepared: &MetalPreparedSetup,
@@ -70,6 +106,23 @@ impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, 
                 plan.log_basis_outer,
                 true,
             );
+        }
+        if matches!(D, 64 | 128)
+            && plan.n_d == 0
+            && plan.n_b == 0
+            && plan.n_a != 0
+            && source.e_hat.is_empty()
+            && source.t_hat.is_empty()
+            && source.z_segment.len() >= 32_768
+        {
+            if let Some(rows) = self.centered_relation_rows(
+                prepared,
+                source.z_segment,
+                plan.n_a,
+                source.z_folded_centered_inf_norm,
+            )? {
+                return Ok(rows);
+            }
         }
         let rhs_abs_bound = source
             .z_segment
@@ -181,6 +234,85 @@ impl<const D: usize> RingSwitchRelationKernel<RingSwitchRelationView<'_, D>, F, 
 }
 
 impl MetalBackend {
+    fn centered_relation_rows<const D: usize>(
+        &self,
+        prepared: &MetalPreparedSetup,
+        centered: &[[i32; D]],
+        num_rows: usize,
+        claimed_bound: u32,
+    ) -> Result<Option<RingSwitchRelationRows<F, D>>, AkitaError> {
+        let bound = cfg_chunks!(centered, 4096)
+            .map(|rows| {
+                rows.iter()
+                    .flatten()
+                    .map(|value| value.unsigned_abs())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0)
+            .max(claimed_bound);
+        let Some(runtime) = self
+            .runtime()
+            .filter(|_| matches!(D, 64 | 128) && bound <= 1024)
+        else {
+            return Ok(None);
+        };
+        let _span = tracing::info_span!(
+            "MetalRingSwitch::centered_relation_rows",
+            num_rows,
+            num_columns = centered.len(),
+            ring_d = D,
+            bound
+        )
+        .entered();
+        let matrix_start = Instant::now();
+        let fields = prepared
+            .expanded
+            .shared_matrix()
+            .ring_view::<D>(num_rows, centered.len())?;
+        let matrix = runtime
+            .shared_slice_buffer(fields.as_slice())
+            .map_err(MetalCommitError::into_akita)?;
+        let matrix_prepare_time = matrix_start.elapsed();
+        let outcome = runtime
+            .dispatch_centered_relation_rows(&matrix.buffer, centered, num_rows)
+            .map_err(MetalCommitError::into_akita)?;
+        let coefficients = outcome
+            .coefficients
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| F::from_device(value, index))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MetalCommitError::into_akita)?;
+        let a_quotients = coefficients
+            .chunks_exact(D)
+            .map(CyclotomicRing::from_slice)
+            .collect();
+        let timings = outcome.timings;
+        self.update_opening_metrics(|metrics| {
+            metrics.command_wall_time += timings.command_wall;
+            metrics.gpu_active_time += timings.gpu.unwrap_or_default();
+            metrics.buffer_setup_time += timings.buffer_setup + matrix_prepare_time;
+            metrics.readback_time += timings.readback_copy;
+            metrics.allocation_bytes = metrics
+                .allocation_bytes
+                .saturating_add(outcome.allocation_bytes)
+                .saturating_add(if matrix.zero_copy {
+                    0
+                } else {
+                    size_of_val(fields.as_slice())
+                });
+        })
+        .map_err(MetalCommitError::into_akita)?;
+        Ok(Some(RingSwitchRelationRows {
+            d_negacyclic: Vec::new(),
+            d_cyclic: Vec::new(),
+            b_cyclic: Vec::new(),
+            a_quotients,
+        }))
+    }
+
     fn digit_relation_rows<const D: usize>(
         &self,
         prepared: &MetalPreparedSetup,
@@ -200,11 +332,11 @@ impl MetalBackend {
         let columns_per_partial = digit_rows_columns_per_partial(log_basis)
             .ok_or_else(|| AkitaError::InvalidInput("digit basis must be in 1..=8".into()))?;
         let bound = 1i16 << (log_basis - 1);
-        if digits
-            .iter()
-            .flatten()
-            .any(|&digit| !(-bound..bound).contains(&i16::from(digit)))
-        {
+        if cfg_chunks!(digits, 4096).any(|rows| {
+            rows.iter()
+                .flatten()
+                .any(|&digit| !(-bound..bound).contains(&i16::from(digit)))
+        }) {
             return Err(AkitaError::InvalidInput(
                 "relation digits exceed the configured basis".into(),
             ));
@@ -390,7 +522,7 @@ mod tests {
     fn cyclic_digit_rows_match_cpu_d64_rank2() {
         const D: usize = 64;
         const ROWS: usize = 2;
-        const COLUMNS: usize = 129;
+        const COLUMNS: usize = 1025;
         let setup = AkitaProverSetup::<F>::generate_with_capacity(
             20,
             1,
@@ -403,7 +535,7 @@ mod tests {
         let cpu_prepared = cpu.prepare_setup(&setup).unwrap();
         let metal = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
         let prepared = metal.prepare_setup(&setup).unwrap();
-        for log_basis in [1, 3, 8] {
+        for log_basis in 1..=8 {
             let bound = 1i16 << (log_basis - 1);
             for negative_only in [false, true] {
                 for columns in [1, 128, COLUMNS] {
@@ -461,6 +593,103 @@ mod tests {
                 8,
             )
         );
+    }
+
+    fn check_centered_rows<const D: usize>(rows: usize) {
+        const COLUMNS: usize = 259;
+        let setup = AkitaProverSetup::<F>::generate_with_capacity(
+            20,
+            1,
+            SetupMatrixCapacity {
+                num_field_elements: rows * COLUMNS * D,
+            },
+        )
+        .unwrap();
+        let cpu = CpuBackend::DEFAULT;
+        let cpu_prepared = cpu.prepare_setup(&setup).unwrap();
+        let metal = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
+        let prepared = metal.prepare_setup(&setup).unwrap();
+        for columns in [1, 256, COLUMNS] {
+            for negative_only in [false, true] {
+                let centered = (0..columns)
+                    .map(|column| {
+                        std::array::from_fn(|coefficient| {
+                            if negative_only {
+                                -1024
+                            } else {
+                                [-1024, -1, 0, 1, 1024][(column + coefficient) % 5]
+                            }
+                        })
+                    })
+                    .collect::<Vec<[i32; D]>>();
+                let expected = cpu
+                    .relation_rows(
+                        &cpu_prepared,
+                        RingSwitchRelationView {
+                            e_hat: &[],
+                            t_hat: &[],
+                            z_segment: &centered,
+                            z_folded_centered_inf_norm: 1024,
+                        },
+                        RingSwitchRelationPlan {
+                            n_d: 0,
+                            n_b: 0,
+                            n_a: rows,
+                            log_basis_open: 3,
+                            log_basis_outer: 3,
+                        },
+                    )
+                    .unwrap();
+                let actual = metal
+                    .centered_relation_rows(&prepared, &centered, rows, 0)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "D={D}, rows={rows}, columns={columns}, negative={negative_only}"
+                );
+            }
+        }
+        assert!(metal
+            .centered_relation_rows(&prepared, &[[-1025; D]], rows, 0)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn centered_relation_rows_match_cpu_at_limb_bound() {
+        check_centered_rows::<64>(2);
+        check_centered_rows::<128>(3);
+    }
+
+    fn check_centered_digits<const D: usize>() {
+        let metal = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
+        let centered = (0..131 * D)
+            .map(|i| [i32::MIN, -1024, -129, -1, 0, 1, 127, 1024, i32::MAX][i % 9])
+            .collect::<Vec<_>>();
+        for log_basis in 1..=8 {
+            let digits = 32usize.div_ceil(log_basis as usize);
+            let expected = <CpuBackend as RingSwitchRelationKernel<
+                RingSwitchRelationView<'_, D>,
+                F,
+                D,
+            >>::decompose_z_planes(
+                &CpuBackend::DEFAULT, &centered, digits, log_basis
+            )
+            .unwrap();
+            let (actual, _, _) = metal
+                .runtime()
+                .unwrap()
+                .dispatch_centered_digit_planes::<D>(&centered, digits, log_basis)
+                .unwrap();
+            assert_eq!(actual, expected, "D={D}, basis={log_basis}");
+        }
+    }
+
+    #[test]
+    fn centered_digit_planes_match_cpu_at_i32_extrema() {
+        check_centered_digits::<64>();
+        check_centered_digits::<128>();
     }
 
     #[test]

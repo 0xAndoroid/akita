@@ -141,7 +141,7 @@ impl MetalRuntime {
                 encoder.end_encoding();
                 let encoder = command.new_compute_command_encoder();
                 encoder.set_label("Akita fp128 D64 digit-row reduction");
-                encoder.set_compute_pipeline_state(&self.fp128_d64_digit_rows_reduce_pipeline);
+                encoder.set_compute_pipeline_state(&self.fp128_relation_rows_reduce_pipeline);
                 encoder.set_buffer(0, Some(&partials), 0);
                 encoder.set_buffer(1, Some(&output), 0);
                 set_inline_bytes(encoder, 2, &params);

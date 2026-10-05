@@ -4,10 +4,14 @@
 //! position-partitioned accumulation strategies, and the final witness
 //! construction used by dense, one-hot, and sparse-ring backends.
 
+mod centered_digits;
 mod decompose_fold_partitioned;
 mod narrow_accum;
 mod rotated_accum;
 
+#[cfg(test)]
+pub(crate) use centered_digits::balanced_decompose_centered_i32_i8_into;
+pub(crate) use centered_digits::decompose_z_folded_planes;
 pub(crate) use decompose_fold_partitioned::packed_tight_digit_fold_partitioned;
 pub use decompose_fold_partitioned::{
     balanced_ring_decompose_fold_partitioned, cached_digit_decompose_fold_partitioned,

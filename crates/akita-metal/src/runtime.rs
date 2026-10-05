@@ -20,6 +20,7 @@ use crate::field::{Fp128Limbs, F};
 use crate::MetalCommitError;
 
 mod buffers;
+mod centered_rows;
 mod coefficient_packing;
 mod commands;
 mod commit;
@@ -48,7 +49,7 @@ const FP128_D128_DECOMPOSE_FOLD_KERNEL_NAME: &str = "akita_fp128_d128_decompose_
 const FP128_D128_SUBRING64_DECOMPOSE_FOLD_KERNEL_NAME: &str =
     "akita_fp128_d128_subring64_decompose_fold";
 const FP128_D64_DIGIT_ROWS_PARTIALS_KERNEL_NAME: &str = "akita_fp128_d64_digit_rows_partials";
-const FP128_D64_DIGIT_ROWS_REDUCE_KERNEL_NAME: &str = "akita_fp128_d64_digit_rows_reduce";
+const FP128_RELATION_ROWS_REDUCE_KERNEL_NAME: &str = "akita_fp128_relation_rows_reduce";
 const FP128_I8_COEFFICIENT_PACKING_KERNEL_NAME: &str = "akita_fp128_i8_coefficient_packing";
 const FP128_PACKED_ONEHOT_COEFFICIENT_PACKING_PARTIALS_KERNEL_NAME: &str =
     "akita_fp128_packed_onehot_coefficient_packing_partials";
@@ -118,6 +119,8 @@ const KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/onehot.metal"),
     "\n",
     include_str!("kernels/recursive_fold.metal"),
+    "\n",
+    include_str!("kernels/ring_switch.metal"),
 );
 const FP128_D512_THREADS: usize = 1_024;
 const PACKED_ONEHOT_BUFFER_ALIGNMENT: usize = 16 * 1024;
@@ -991,7 +994,9 @@ pub(crate) struct MetalRuntime {
     packed_fp128_d128_rank3_pipeline: ComputePipelineState,
     packed_partial_reduction_pipeline: ComputePipelineState,
     fp128_d64_digit_rows_partials_pipeline: ComputePipelineState,
-    fp128_d64_digit_rows_reduce_pipeline: ComputePipelineState,
+    fp128_relation_rows_reduce_pipeline: ComputePipelineState,
+    fp128_centered_rows_partials_pipeline: ComputePipelineState,
+    centered_digit_planes_pipeline: ComputePipelineState,
     fp128_i8_coefficient_packing_pipeline: ComputePipelineState,
     fp128_packed_onehot_coefficient_packing_partials_pipeline: ComputePipelineState,
     fp128_packed_onehot_coefficient_packing_reduce_pipeline: ComputePipelineState,
@@ -1071,9 +1076,9 @@ impl MetalRuntime {
             fp128_d64_digit_rows_partials_pipeline: pipeline(
                 FP128_D64_DIGIT_ROWS_PARTIALS_KERNEL_NAME,
             )?,
-            fp128_d64_digit_rows_reduce_pipeline: pipeline(
-                FP128_D64_DIGIT_ROWS_REDUCE_KERNEL_NAME,
-            )?,
+            fp128_relation_rows_reduce_pipeline: pipeline(FP128_RELATION_ROWS_REDUCE_KERNEL_NAME)?,
+            fp128_centered_rows_partials_pipeline: pipeline("akita_fp128_centered_rows_partials")?,
+            centered_digit_planes_pipeline: pipeline("akita_centered_digit_planes")?,
             fp128_i8_coefficient_packing_pipeline: pipeline(
                 FP128_I8_COEFFICIENT_PACKING_KERNEL_NAME,
             )?,

@@ -47,6 +47,16 @@ pub trait RingSwitchRelationKernel<S, F, const D: usize>: ComputeBackendSetup<F>
 where
     F: Field + CanonicalEncoding,
 {
+    /// Balanced Z digits in `(ring, digit, coefficient)` order.
+    fn decompose_z_planes(
+        &self,
+        centered: &[i32],
+        num_digits: usize,
+        log_basis: u32,
+    ) -> Result<Vec<[i8; D]>, AkitaError> {
+        crate::backend::poly_helpers::decompose_z_folded_planes(centered, num_digits, log_basis)
+    }
+
     /// Fused D rows in both domains, B cyclic rows, and A-side quotient rows.
     fn relation_rows(
         &self,

@@ -290,7 +290,7 @@ impl MetalRuntime {
                 .max_total_threads_per_threadgroup()
                 >= FP128_D64_DIGIT_ROWS_PARTIAL_THREADS as u64
             && self
-                .fp128_d64_digit_rows_reduce_pipeline
+                .fp128_relation_rows_reduce_pipeline
                 .max_total_threads_per_threadgroup()
                 >= FP128_D64_DIGIT_ROWS_THREADS as u64
     }
