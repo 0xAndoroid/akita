@@ -692,6 +692,146 @@ mod tests {
         check_centered_digits::<128>();
     }
 
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn centered(&mut self, bound: i32) -> i32 {
+            ((self.next() >> 11) % (2 * bound as u64 + 1)) as i32 - bound
+        }
+    }
+
+    fn check_routed_centered_rows<const D: usize>(rows: usize, columns: usize, seed: u64) {
+        let setup = AkitaProverSetup::<F>::generate_with_capacity(
+            20,
+            1,
+            SetupMatrixCapacity {
+                num_field_elements: rows * columns * D,
+            },
+        )
+        .unwrap();
+        let cpu = CpuBackend::DEFAULT;
+        let cpu_prepared = cpu.prepare_setup(&setup).unwrap();
+        let metal = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
+        let prepared = metal.prepare_setup(&setup).unwrap();
+        let mut rng = Lcg(seed);
+        let random = |rng: &mut Lcg| {
+            (0..columns)
+                .map(|_| std::array::from_fn(|_| rng.centered(1024)))
+                .collect::<Vec<[i32; D]>>()
+        };
+        let mut one_over = random(&mut rng);
+        one_over[columns / 2][D - 1] = 1025;
+        let mut one_under = random(&mut rng);
+        one_under[columns - 1][0] = -1025;
+        let cases: Vec<(&str, Vec<[i32; D]>, u32, bool)> = vec![
+            ("random", random(&mut rng), 0, true),
+            ("all+1024", vec![[1024; D]; columns], 0, true),
+            ("all-1024", vec![[-1024; D]; columns], 0, true),
+            ("claimed2000", random(&mut rng), 2000, false),
+            ("one+1025", one_over, 0, false),
+            ("one-1025", one_under, 0, false),
+        ];
+        for (label, centered, claimed_bound, expect_gpu) in cases {
+            let actual_bound = centered
+                .iter()
+                .flatten()
+                .map(|value| value.unsigned_abs())
+                .max()
+                .unwrap();
+            let view = RingSwitchRelationView {
+                e_hat: &[],
+                t_hat: &[],
+                z_segment: &centered,
+                z_folded_centered_inf_norm: actual_bound.max(claimed_bound),
+            };
+            let plan = RingSwitchRelationPlan {
+                n_d: 0,
+                n_b: 0,
+                n_a: rows,
+                log_basis_open: 3,
+                log_basis_outer: 3,
+            };
+            let expected = cpu.relation_rows(&cpu_prepared, view, plan).unwrap();
+            metal.begin_opening_metrics().unwrap();
+            let actual = metal.relation_rows(&prepared, view, plan).unwrap();
+            let metrics = metal.last_opening_metrics().unwrap().unwrap();
+            assert_eq!(actual, expected, "D={D}, columns={columns}, case={label}");
+            assert_eq!(
+                metrics.cpu_fallback_calls == 0,
+                expect_gpu,
+                "route D={D}, columns={columns}, case={label}"
+            );
+        }
+    }
+
+    #[test]
+    fn routed_centered_rows_match_cpu_and_reject_any_coefficient_past_bound() {
+        check_routed_centered_rows::<64>(3, 32_768, 1);
+        check_routed_centered_rows::<128>(3, 65_792, 3);
+    }
+
+    fn z_planes<const D: usize>(
+        backend: &impl RingSwitchRelationKernel<RingSwitchRelationView<'static, D>, F, D>,
+        centered: &[i32],
+        digits: usize,
+        log_basis: u32,
+    ) -> Result<Vec<[i8; D]>, AkitaError> {
+        backend.decompose_z_planes(centered, digits, log_basis)
+    }
+
+    fn check_routed_digit_planes<const D: usize>(rings: usize, seed: u64) {
+        let metal = MetalBackend::new(MetalExecutionPolicy::RequireMetal).unwrap();
+        let mut rng = Lcg(seed);
+        let centered = (0..rings * D)
+            .map(|index| match index % 8 {
+                0 => rng.next() as i32,
+                1 => rng.centered(1024),
+                2 => i32::MIN + (rng.next() % 3) as i32,
+                3 => i32::MAX - (rng.next() % 3) as i32,
+                4 => rng.centered(1 << 20),
+                5 => 0,
+                6 => -(1 << (rng.next() % 31)),
+                _ => rng.centered(129),
+            })
+            .collect::<Vec<i32>>();
+        for log_basis in 1..=8u32 {
+            let max_digits = (128 + log_basis) as usize / log_basis as usize;
+            for digits in [1, 32usize.div_ceil(log_basis as usize), max_digits] {
+                let expected =
+                    z_planes::<D>(&CpuBackend::DEFAULT, &centered, digits, log_basis).unwrap();
+                metal.begin_opening_metrics().unwrap();
+                let actual = z_planes::<D>(&metal, &centered, digits, log_basis).unwrap();
+                let metrics = metal.last_opening_metrics().unwrap().unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "D={D}, basis={log_basis}, digits={digits}"
+                );
+                assert!(
+                    metrics.gpu_active_time > std::time::Duration::ZERO,
+                    "route D={D}, basis={log_basis}, digits={digits}"
+                );
+            }
+            assert!(
+                z_planes::<D>(&CpuBackend::DEFAULT, &centered, max_digits + 1, log_basis).is_err()
+            );
+            assert!(z_planes::<D>(&metal, &centered, max_digits + 1, log_basis).is_err());
+        }
+    }
+
+    #[test]
+    fn routed_digit_planes_match_cpu_at_every_digit_count() {
+        check_routed_digit_planes::<128>((1 << 20) / 128 + 3, 7);
+        check_routed_digit_planes::<64>((1 << 20) / 64, 8);
+    }
+
     #[test]
     fn d512_linear_relation_matches_cpu_across_tiles() {
         const D: usize = 512;
