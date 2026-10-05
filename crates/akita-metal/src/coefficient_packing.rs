@@ -186,7 +186,7 @@ mod tests {
     }
 
     fn check_packed_coefficient_packing<const D: usize>() {
-        const ROWS: usize = 1 << 16;
+        const ROWS: usize = 1 << 17;
         const LIVE_COLUMNS: usize = 2;
         const COLUMN_CAPACITY: usize = 4;
         const K: usize = 256;

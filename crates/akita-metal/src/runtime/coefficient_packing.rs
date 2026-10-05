@@ -159,14 +159,16 @@ impl MetalRuntime {
             let expected_active_zero_words = params.num_rows.div_ceil(u64::BITS as u64);
             if params.num_rows == 0
                 || params.num_columns == 0
+                || !params.column_capacity.is_power_of_two()
                 || params.num_columns > params.column_capacity
                 || params.onehot_k == 0
-                || params.ring_d == 0
+                || !params.ring_d.is_power_of_two()
                 || params.positions_per_block == 0
                 || params.blocks_per_column == 0
                 || params.rows_per_block == 0
                 || params.rows_per_partial
                     != FP128_PACKED_COEFFICIENT_PACKING_ROWS_PER_PARTIAL as u64
+                || !params.row_partials_per_block.is_power_of_two()
                 || params.row_partials_per_block != expected_row_partials
                 || params.stride == 0
                 || params.subring_dimension == 0

@@ -981,8 +981,8 @@ kernel void akita_fp128_packed_onehot_coefficient_packing_partials(
     uint3 threadgroup_index [[threadgroup_position_in_grid]])
 {
     threadgroup atomic_int bucket_digits[256 * 8];
-    // PackedOneHotCommitView and the prepared packing geometry enforce power-of-two
-    // dimensions; row partials use the fixed 32768-row accumulator bound.
+    // dispatch_fp128_packed_onehot_coefficient_packing checks these power-of-two divisors.
+    // runtime.rs checks the fixed row-partial size at compile time.
     ulong group = (ulong)threadgroup_index.x;
     ulong column = group & (params.column_capacity - 1ul);
     ulong column_partial = group >> ctz(params.column_capacity);
