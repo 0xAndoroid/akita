@@ -1,4 +1,7 @@
 use super::*;
+use metal::NSRange;
+
+pub(super) const D128_RANK3_SLAB: bool = true;
 
 impl MetalRuntime {
     pub(crate) fn dispatch_onehot(
@@ -431,6 +434,14 @@ impl MetalRuntime {
                 ));
             }
             params.columns_per_threadgroup = 1;
+            if D128_RANK3_SLAB {
+                return self.dispatch_packed_onehot_d128_rank3_slabs(
+                    matrix,
+                    lanes,
+                    active_zero_rows,
+                    params,
+                );
+            }
             let tasks_per_stream = FP128_D128_RANK3_TASKS_PER_STREAM as u64;
             let base_streams = params.num_blocks.div_ceil(tasks_per_stream);
             let groups_per_stream = params
@@ -598,6 +609,110 @@ impl MetalRuntime {
                 scratch_bytes,
                 input_zero_copy,
             })
+        })
+    }
+
+    fn dispatch_packed_onehot_d128_rank3_slabs(
+        &self,
+        matrix: &Buffer,
+        lanes: &[u8],
+        active_zero_rows: &[u64],
+        mut params: PackedOneHotCommitParams,
+    ) -> Result<DispatchOutcome, MetalCommitError> {
+        const SLAB_POSITIONS: u64 = 1024;
+        const SLABS_PER_COMMAND: usize = 16;
+        let buffer_start = Instant::now();
+        let output_count = usize::try_from(params.output_coefficients)
+            .map_err(|_| MetalCommitError::ShapeOverflow("output coefficients"))?;
+        let output_bytes = output_count
+            .checked_mul(size_of::<Fp128Limbs>())
+            .ok_or(MetalCommitError::ShapeOverflow("output bytes"))?;
+        let output = self.shared_buffer(output_bytes)?;
+        let lane_buffer = self.packed_lane_buffer(lanes)?;
+        let no_active_zero_rows = [0u64];
+        let active_zero_rows = self.shared_buffer_from_slice(if active_zero_rows.is_empty() {
+            no_active_zero_rows.as_slice()
+        } else {
+            active_zero_rows
+        })?;
+        let buffer_setup = buffer_start.elapsed();
+        let streams = params
+            .num_blocks
+            .div_ceil(FP128_D128_RANK3_TASKS_PER_STREAM as u64);
+        let threadgroups = streams * params.n_a;
+        params.positions_per_partial = params.positions_per_block.min(SLAB_POSITIONS);
+        params.position_partials_per_block = 1;
+        let slabs = params.positions_per_block.div_ceil(SLAB_POSITIONS);
+        let mut commands = Vec::with_capacity((slabs as usize).div_ceil(SLABS_PER_COMMAND));
+        let command_start = Instant::now();
+        for first_slab in (0..slabs).step_by(SLABS_PER_COMMAND) {
+            let command = self.queue.new_command_buffer();
+            command.set_label("Akita packed fp128 D128 rank-3 root commitment slabs");
+            if first_slab == 0 {
+                // Skipped suffix blocks and unused columns have no kernel writer.
+                let zero = command.new_blit_command_encoder();
+                zero.fill_buffer(&output, NSRange::new(0, output_bytes as u64), 0);
+                zero.end_encoding();
+            }
+            let encoder = command.new_compute_command_encoder();
+            encoder.set_label("Akita packed fp128 D128 rank-3 position slabs");
+            encoder.set_compute_pipeline_state(&self.packed_fp128_d128_rank3_pipeline);
+            encoder.set_buffer(0, Some(matrix), 0);
+            encoder.set_buffer(1, Some(&lane_buffer.buffer), 0);
+            encoder.set_buffer(2, Some(&output), 0);
+            encoder.set_buffer(4, Some(&active_zero_rows), 0);
+            // Serial dispatches order every task/rank write before the next slab's reads.
+            for slab in first_slab..(first_slab + SLABS_PER_COMMAND as u64).min(slabs) {
+                let position_start = slab * SLAB_POSITIONS;
+                params.positions_per_partial =
+                    (params.positions_per_block - position_start).min(SLAB_POSITIONS);
+                set_inline_bytes(encoder, 3, &params);
+                set_inline_bytes(encoder, 5, &position_start);
+                encoder.dispatch_thread_groups(
+                    MTLSize::new(threadgroups, 1, 1),
+                    MTLSize::new(FP128_D128_RANK3_THREADS as u64, 1, 1),
+                );
+            }
+            encoder.end_encoding();
+            command.commit();
+            commands.push(command);
+        }
+        for command in &commands {
+            command.wait_until_completed();
+            validate_completed_command(command)?;
+        }
+        let command_wall = command_start.elapsed();
+        let panel_gpu_active = commands.iter().try_fold(Duration::ZERO, |total, command| {
+            total.checked_add(completed_command_gpu_time(command)?)
+        });
+        let panel_gpu_span = commands
+            .first()
+            .zip(commands.last())
+            .and_then(|(first, last)| completed_commands_gpu_span(first, last));
+        let readback_start = Instant::now();
+        // SAFETY: completed commands initialized all `output_count` aligned Fp128Limbs.
+        let coefficients = unsafe {
+            std::slice::from_raw_parts(output.contents().cast::<Fp128Limbs>(), output_count)
+                .to_vec()
+        };
+        Ok(DispatchOutcome {
+            coefficients,
+            timings: DispatchTimings {
+                buffer_setup,
+                command_wall,
+                gpu: panel_gpu_span,
+                readback_copy: readback_start.elapsed(),
+            },
+            panel_gpu_active,
+            panel_gpu_span,
+            reduction_gpu: Some(Duration::ZERO),
+            command_buffers: commands.len(),
+            kernel: MetalOneHotKernel::PackedFp128D128Rank3,
+            blocks_per_threadgroup: FP128_D128_RANK3_TASKS_PER_STREAM,
+            columns_per_threadgroup: 1,
+            matrix_block_streams: (threadgroups * slabs) as usize,
+            scratch_bytes: 0,
+            input_zero_copy: lane_buffer.zero_copy,
         })
     }
 

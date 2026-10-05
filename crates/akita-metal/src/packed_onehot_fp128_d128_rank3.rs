@@ -395,6 +395,11 @@ mod tests {
     }
 
     #[test]
+    fn parity_d128_rank3_k256_suffix_after_slab_boundary() {
+        assert_rank3_parity(1 << 12, 1 << 12, 5, Some(513));
+    }
+
+    #[test]
     fn parity_d128_rank3_k256_full_capacity_rows_2p16() {
         assert_rank3_parity(1 << 16, 1 << 12, 32, None);
     }
