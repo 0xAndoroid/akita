@@ -124,12 +124,24 @@ impl MetalRuntime {
         })
     }
 
-    pub(crate) fn private_buffer_from_slice<T>(
+    /// Private buffer of `len` limbs that `fill` writes directly into the
+    /// Shared staging buffer the upload blit reads.
+    pub(crate) fn private_buffer_filled(
         &self,
-        values: &[T],
+        len: usize,
+        fill: impl FnOnce(&mut [Fp128Limbs]),
     ) -> Result<Buffer, MetalCommitError> {
-        let bytes = size_of_val(values);
-        let staging = self.shared_buffer_from_slice(values)?;
+        let bytes = len
+            .checked_mul(size_of::<Fp128Limbs>())
+            .ok_or(MetalCommitError::ShapeOverflow("private buffer bytes"))?;
+        let staging = self.shared_buffer(bytes)?;
+        // SAFETY: `staging` is a fresh page-aligned Shared allocation of
+        // `len` limbs, zero-initialized by Metal (`newBufferWithLength`), that
+        // no command or other reference can observe yet; every bit pattern is
+        // a valid `Fp128Limbs`.
+        fill(unsafe {
+            std::slice::from_raw_parts_mut(staging.contents().cast::<Fp128Limbs>(), len)
+        });
         let buffer = self.private_buffer(bytes)?;
         let command = self.queue.new_command_buffer();
         command.set_label("Akita immutable setup upload");

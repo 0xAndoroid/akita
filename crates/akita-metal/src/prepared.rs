@@ -110,17 +110,16 @@ impl MetalPreparedSetup {
                     "validated Metal A-matrix prefix is unexpectedly unavailable".into(),
                 )
             })?;
-        let packed = fields
-            .iter()
-            .copied()
-            .map(F::into_device)
-            .collect::<Vec<_>>();
-        let bytes = size_of_val(packed.as_slice());
         let buffer = Arc::new(
             runtime
-                .private_buffer_from_slice(&packed)
+                .private_buffer_filled(field_count, |packed| {
+                    for (limbs, &field) in packed.iter_mut().zip(fields) {
+                        *limbs = field.into_device();
+                    }
+                })
                 .map_err(MetalCommitError::into_akita)?,
         );
+        let bytes = required_bytes;
         let prepare_time = start.elapsed();
         matrices.insert(
             key,
