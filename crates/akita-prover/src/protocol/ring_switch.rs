@@ -43,10 +43,6 @@ pub struct RingSwitchOutput<E: Field> {
     pub(crate) w_evals_compact: crate::backend::packed_digits::PackedSignedDigits,
     /// Canonical flat relation-witness domain and coefficient/lane split.
     pub(crate) relation_address_geometry: akita_types::RelationAddressGeometry,
-    /// Mode-typed ordinary and compression ring-relation weights.
-    pub(crate) relation_weights: crate::protocol::sumcheck::RelationWeightOracle<E>,
-    /// Atomic payload-mode state for Stage-2 compression and binary terms.
-    pub(crate) compression: RingSwitchCompression<E>,
     /// Low-variable count used by the protocol's Stage-1 tau0 equality point.
     pub digit_range_equality_low_variable_count: usize,
     /// Challenge tau0 for F_0 sumcheck.
@@ -70,10 +66,37 @@ pub(crate) enum RingSwitchCompression<E: Field> {
     },
 }
 
-/// Transcript-complete ring-switch state and the exact relation authority
-/// compiled from its freshly sampled challenges.
-pub(crate) struct RingSwitchFinalization<E: Field> {
+/// Transcript-complete ring-switch state and the relation authority to compile
+/// from its freshly sampled challenges.
+pub(crate) struct RingSwitchFinalization<'a, F: Field, E: Field> {
     pub(crate) output: RingSwitchOutput<E>,
     pub(crate) relation_plan: RelationRangeImagePlan,
+    pub(crate) relation_weights: RelationWeightCompiler<'a, F, E>,
+}
+
+/// Inputs of the relation-weight compilation once the ring-switch challenges
+/// are sampled. Compiling reads no transcript state, so the fold driver runs
+/// it beside Stage 1.
+pub(crate) struct RelationWeightCompiler<'a, F: Field, E: Field> {
+    setup: &'a AkitaExpandedSetup<F>,
+    instance: &'a RingRelationInstance<F>,
+    lp: &'a CommittedGroupParams,
+    prepared_relation_groups: &'a [crate::protocol::ring_relation::PreparedRelationGroup<F, E>],
+    gamma: Vec<E>,
+    opening_claim_coefficients: &'a [E],
+    alpha: E,
+    tau1: Vec<E>,
+    opening_source_len: usize,
+    opening_ring_dim: usize,
+    physical_field_len: usize,
+    witness_layout: akita_types::WitnessLayout,
+}
+
+/// Compiled ring-relation weights and the opening semantics derived with them.
+pub(crate) struct CompiledRelationWeights<E: Field> {
+    /// Mode-typed ordinary and compression ring-relation weights.
+    pub(crate) relation_weights: crate::protocol::sumcheck::RelationWeightOracle<E>,
+    /// Atomic payload-mode state for Stage-2 compression and binary terms.
+    pub(crate) compression: RingSwitchCompression<E>,
     pub(crate) opening_semantics: OpeningFamily<(), CoefficientPackingBatchSemantics<E>>,
 }

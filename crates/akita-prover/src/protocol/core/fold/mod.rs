@@ -539,9 +539,9 @@ where
         &prepared_fold.relation_groups,
     )
     .map_err(|err| AkitaError::InvalidInput(format!("ring-switch finalize failed: {err:?}")))?;
-    let mut rs = ring_switch.output;
+    let rs = ring_switch.output;
     let relation_range_image_plan = ring_switch.relation_plan;
-    let opening_semantics = ring_switch.opening_semantics;
+    let relation_weight_compiler = ring_switch.relation_weights;
 
     let relation_rhs_layout = relation_range_image_plan
         .relation_witness_geometry()
@@ -554,6 +554,11 @@ where
     )?;
     let prepare_stage2 = || {
         let _span = tracing::info_span!("stage2_static_prepare").entered();
+        let CompiledRelationWeights {
+            relation_weights,
+            compression,
+            opening_semantics,
+        } = relation_weight_compiler.compile(&relation_range_image_plan)?;
         let opening_preparation_span = tracing::info_span!(
             "stage2_opening_preparation",
             claims = opening_batch.num_total_polynomials(),
@@ -653,7 +658,7 @@ where
             }
         };
         drop(opening_preparation_span);
-        let preparation = match &rs.relation_weights {
+        let preparation = match &relation_weights {
             crate::protocol::sumcheck::RelationWeightOracle::ReducedDense(_) => None,
             crate::protocol::sumcheck::RelationWeightOracle::QuotientFactored(weights) => Some(
                 stack.opening().backend().prepare_direct_relation_range(
@@ -671,7 +676,13 @@ where
                 )?,
             ),
         };
-        Ok::<_, AkitaError>((linear_terms, scalar_opening_claim, preparation))
+        Ok::<_, AkitaError>((
+            linear_terms,
+            scalar_opening_claim,
+            preparation,
+            relation_weights,
+            compression,
+        ))
     };
     let level_u32 = u32::try_from(level)
         .map_err(|_| AkitaError::InvalidSetup("fold level exceeds u32".into()))?;
@@ -712,7 +723,8 @@ where
         )
     };
     let (stage1_proof, stage1_point, range_image_evaluation, physical_l2) = stage1_result?;
-    let (linear_terms, scalar_opening_claim, stage2_preparation) = stage2_static?;
+    let (linear_terms, scalar_opening_claim, stage2_preparation, relation_weights, compression) =
+        stage2_static?;
     transcript.append_serde(
         ABSORB_RANGE_IMAGE_EVALUATION,
         &stage1_proof.range_image_evaluation,
@@ -739,10 +751,7 @@ where
         None
     };
     let stage1_proof = Some(stage1_proof);
-    let compression = match std::mem::replace(
-        &mut rs.compression,
-        crate::protocol::ring_switch::RingSwitchCompression::Raw,
-    ) {
+    let compression = match compression {
         crate::protocol::ring_switch::RingSwitchCompression::Raw => stages::Stage2Compression::Raw,
         crate::protocol::ring_switch::RingSwitchCompression::QuotientLift { weights, support } => {
             transcript.grind_query(akita_types::GrindingSite::CompressionBinary {
@@ -786,6 +795,7 @@ where
         stack.opening(),
         batching_coeff,
         rs,
+        relation_weights,
         &stage1_point,
         range_image_evaluation,
         relation_claim,

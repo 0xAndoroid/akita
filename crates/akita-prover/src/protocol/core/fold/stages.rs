@@ -112,6 +112,7 @@ pub(super) fn prove_stage2<F, E, T, O>(
     opening: &crate::compute::OperationCtx<'_, F, O>,
     batching_coeff: E,
     rs: RingSwitchOutput<E>,
+    relation_weights: crate::protocol::sumcheck::RelationWeightOracle<E>,
     stage1_point: &[E],
     range_image_evaluation: E,
     relation_claim: E,
@@ -142,7 +143,6 @@ where
             "ring-switch output disagrees with the relation/range-image plan".into(),
         ));
     }
-    let relation_weights = rs.relation_weights;
     let domain_len = domain.domain_len();
     let (mut linear_weights, binary_intervals, binary_batching) = match compression {
         Stage2Compression::Raw => (Vec::new(), Vec::new(), E::zero()),

@@ -16,19 +16,19 @@ use jolt_field::MulBaseUnreduced;
 #[tracing::instrument(skip_all, name = "ring_switch_finalize")]
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-pub(crate) fn ring_switch_finalize<F, E, T>(
-    instance: &RingRelationInstance<F>,
-    setup: &AkitaExpandedSetup<F>,
+pub(crate) fn ring_switch_finalize<'a, F, E, T>(
+    instance: &'a RingRelationInstance<F>,
+    setup: &'a AkitaExpandedSetup<F>,
     transcript: &mut T,
     level: u32,
     w: &RecursiveWitnessFlat,
-    lp: &CommittedGroupParams,
+    lp: &'a CommittedGroupParams,
     opening_source_len: usize,
     opening_ring_dim: usize,
     gamma: Option<&[E]>,
-    opening_claim_coefficients: &[E],
-    prepared_relation_groups: &[crate::protocol::ring_relation::PreparedRelationGroup<F, E>],
-) -> Result<RingSwitchFinalization<E>, AkitaError>
+    opening_claim_coefficients: &'a [E],
+    prepared_relation_groups: &'a [crate::protocol::ring_relation::PreparedRelationGroup<F, E>],
+) -> Result<RingSwitchFinalization<'a, F, E>, AkitaError>
 where
     F: Field + CanonicalEncoding + akita_serialization::AkitaSerialize,
     E: FpExtEncoding<F> + Ring + MulBaseUnreduced<F>,
@@ -132,47 +132,112 @@ where
         witness_layout.clone(),
         opening_batch,
     )?;
-    let prepared_coefficient_packing_points;
-    let opening_points = match prepared_relation_groups
-        .first()
-        .ok_or(AkitaError::InvalidProof)?
-        .kind()
-    {
-        akita_types::OpeningFamily::EvaluationTrace(_) => {
-            akita_types::OpeningFamily::EvaluationTrace(())
-        }
-        akita_types::OpeningFamily::SubringCoefficientPacking(_) => {
-            prepared_coefficient_packing_points = prepared_relation_groups
-                .iter()
-                .enumerate()
-                .map(|(group_index, group)| match group.kind() {
-                    akita_types::OpeningFamily::SubringCoefficientPacking(point) => {
-                        Ok((group_index, point))
-                    }
-                    akita_types::OpeningFamily::EvaluationTrace(_) => Err(
-                        AkitaError::InvalidSetup("ring-switch opening families are mixed".into()),
-                    ),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            akita_types::OpeningFamily::SubringCoefficientPacking(
-                prepared_coefficient_packing_points.as_slice(),
-            )
-        }
-    };
-    let relation_claim_coefficients = match opening_points {
-        akita_types::OpeningFamily::EvaluationTrace(()) => gamma,
-        akita_types::OpeningFamily::SubringCoefficientPacking(_) => {
-            if opening_claim_coefficients.len() != opening_batch.num_total_polynomials() {
-                return Err(AkitaError::InvalidSize {
-                    expected: opening_batch.num_total_polynomials(),
-                    actual: opening_claim_coefficients.len(),
-                });
-            }
-            opening_claim_coefficients
-        }
-    };
+    let (w_evals_compact, witness_col_bits, witness_ring_bits) =
+        build_w_evals_compact(w.packed_digits(), coeff_count, 1, live_relation_lane_count)
+            .map_err(|err| {
+                AkitaError::InvalidInput(format!("witness opening preparation failed: {err:?}"))
+            })?;
+    if witness_col_bits != col_bits || witness_ring_bits != ring_bits {
+        return Err(AkitaError::InvalidSetup(
+            "prepared witness geometry disagrees with the current relation split".into(),
+        ));
+    }
+    Ok(RingSwitchFinalization {
+        output: RingSwitchOutput {
+            w_evals_compact,
+            relation_address_geometry: geometry,
+            digit_range_equality_low_variable_count,
+            tau0,
+            tau1: tau1.clone(),
+            b: 1usize << lp.open().digits.log_basis,
+            alpha,
+        },
+        relation_plan,
+        relation_weights: RelationWeightCompiler {
+            setup,
+            instance,
+            lp,
+            prepared_relation_groups,
+            gamma: gamma.to_vec(),
+            opening_claim_coefficients,
+            alpha,
+            tau1,
+            opening_source_len,
+            opening_ring_dim,
+            physical_field_len,
+            witness_layout,
+        },
+    })
+}
 
-    let prepare_relation_weights = || {
+impl<F, E> RelationWeightCompiler<'_, F, E>
+where
+    F: Field + CanonicalEncoding + akita_serialization::AkitaSerialize,
+    E: FpExtEncoding<F> + Ring + MulBaseUnreduced<F>,
+{
+    /// Compile the relation weights for `relation_plan`, the plan returned
+    /// beside this compiler.
+    pub(crate) fn compile(
+        &self,
+        relation_plan: &akita_types::RelationRangeImagePlan,
+    ) -> Result<CompiledRelationWeights<E>, AkitaError> {
+        let Self {
+            setup,
+            instance,
+            lp,
+            prepared_relation_groups,
+            ref gamma,
+            opening_claim_coefficients,
+            alpha,
+            ref tau1,
+            opening_source_len,
+            opening_ring_dim,
+            physical_field_len,
+            ref witness_layout,
+        } = *self;
+        let opening_batch = instance.opening_batch();
+        let gamma = gamma.as_slice();
+        let prepared_coefficient_packing_points;
+        let opening_points = match prepared_relation_groups
+            .first()
+            .ok_or(AkitaError::InvalidProof)?
+            .kind()
+        {
+            akita_types::OpeningFamily::EvaluationTrace(_) => {
+                akita_types::OpeningFamily::EvaluationTrace(())
+            }
+            akita_types::OpeningFamily::SubringCoefficientPacking(_) => {
+                prepared_coefficient_packing_points = prepared_relation_groups
+                    .iter()
+                    .enumerate()
+                    .map(|(group_index, group)| match group.kind() {
+                        akita_types::OpeningFamily::SubringCoefficientPacking(point) => {
+                            Ok((group_index, point))
+                        }
+                        akita_types::OpeningFamily::EvaluationTrace(_) => {
+                            Err(AkitaError::InvalidSetup(
+                                "ring-switch opening families are mixed".into(),
+                            ))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                akita_types::OpeningFamily::SubringCoefficientPacking(
+                    prepared_coefficient_packing_points.as_slice(),
+                )
+            }
+        };
+        let relation_claim_coefficients = match opening_points {
+            akita_types::OpeningFamily::EvaluationTrace(()) => gamma,
+            akita_types::OpeningFamily::SubringCoefficientPacking(_) => {
+                if opening_claim_coefficients.len() != opening_batch.num_total_polynomials() {
+                    return Err(AkitaError::InvalidSize {
+                        expected: opening_batch.num_total_polynomials(),
+                        actual: opening_claim_coefficients.len(),
+                    });
+                }
+                opening_claim_coefficients
+            }
+        };
         let _span = tracing::info_span!("relation_weight_compilation").entered();
         match lp.ring_relation_mode {
             akita_types::RingRelationMode::QuotientLift => {
@@ -182,11 +247,11 @@ where
                         instance,
                         alpha,
                         level_params: lp,
-                        relation_row_point: &tau1,
+                        relation_row_point: tau1,
                         claim_coefficients: relation_claim_coefficients,
                         opening_source_len,
                         opening_ring_dim,
-                        relation_plan: &relation_plan,
+                        relation_plan,
                         opening_points,
                     })?;
                 let ordinary = events.factor_common_alpha()?;
@@ -197,13 +262,13 @@ where
                             instance,
                             alpha,
                             lp,
-                            &tau1,
-                            &witness_layout,
+                            tau1,
+                            witness_layout,
                             opening_ring_dim,
                             physical_field_len,
                         )?,
                         support: akita_types::NegativeBinarySupport::new(
-                            &witness_layout,
+                            witness_layout,
                             physical_field_len,
                         )?,
                     }
@@ -230,15 +295,15 @@ where
                     instance,
                     alpha,
                     lp,
-                    &tau1,
+                    tau1,
                     opening_source_len,
                     opening_ring_dim,
-                    &relation_plan,
+                    relation_plan,
                 )?;
                 let compression = if lp.payload_mode.is_compressed() {
                     super::RingSwitchCompression::ReducedEvaluation {
                         support: akita_types::NegativeBinarySupport::new(
-                            &witness_layout,
+                            witness_layout,
                             physical_field_len,
                         )?,
                     }
@@ -252,45 +317,15 @@ where
                 ))
             }
         }
-    };
-
-    #[cfg(feature = "parallel")]
-    let (relation_weights_result, w_result) = rayon::join(prepare_relation_weights, || {
-        build_w_evals_compact(w.packed_digits(), coeff_count, 1, live_relation_lane_count)
-    });
-    #[cfg(not(feature = "parallel"))]
-    let (relation_weights_result, w_result) = {
-        let relation_weights = prepare_relation_weights();
-        let w_compact =
-            build_w_evals_compact(w.packed_digits(), coeff_count, 1, live_relation_lane_count);
-        (relation_weights, w_compact)
-    };
-
-    let (relation_weights, compression, opening_semantics) =
-        relation_weights_result.map_err(|err| {
+        .map(
+            |(relation_weights, compression, opening_semantics)| CompiledRelationWeights {
+                relation_weights,
+                compression,
+                opening_semantics,
+            },
+        )
+        .map_err(|err| {
             AkitaError::InvalidInput(format!("relation-weight compilation failed: {err:?}"))
-        })?;
-    let (w_evals_compact, witness_col_bits, witness_ring_bits) = w_result.map_err(|err| {
-        AkitaError::InvalidInput(format!("witness opening preparation failed: {err:?}"))
-    })?;
-    if witness_col_bits != col_bits || witness_ring_bits != ring_bits {
-        return Err(AkitaError::InvalidSetup(
-            "prepared witness geometry disagrees with the current relation split".into(),
-        ));
+        })
     }
-    Ok(RingSwitchFinalization {
-        output: RingSwitchOutput {
-            w_evals_compact,
-            relation_address_geometry: geometry,
-            relation_weights,
-            compression,
-            digit_range_equality_low_variable_count,
-            tau0,
-            tau1,
-            b: 1usize << lp.open().digits.log_basis,
-            alpha,
-        },
-        relation_plan,
-        opening_semantics,
-    })
 }
