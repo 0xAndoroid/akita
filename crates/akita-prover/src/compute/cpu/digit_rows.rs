@@ -1,10 +1,9 @@
 use super::prepared::validate_digit_row_request;
 use super::CpuBackend;
-use crate::compute::backend::DigitRowsComputeBackend;
+use crate::compute::backend::{digit_rows_ntt_key, DigitRowsComputeBackend};
 use crate::kernels::linear::mat_vec_mul_ntt_digits_i8;
 use akita_algebra::CyclotomicRing;
 use akita_error::AkitaError;
-use akita_types::{NttCacheKey, NttTransformDomain};
 use jolt_field::{CanonicalEncoding, Field};
 
 impl<F> DigitRowsComputeBackend<F> for CpuBackend
@@ -32,9 +31,8 @@ where
             row_width,
             prepared.expanded.shared_matrix.num_field_elements() / D,
         )?;
-        prepared.with_shared_ntt::<D, _>(
-            NttCacheKey::from_matrix_shape(D, row_len, row_width, NttTransformDomain::Negacyclic)?,
-            |ntt| mat_vec_mul_ntt_digits_i8(ntt, row_len, row_width, digit_vectors, log_basis),
-        )
+        prepared.with_shared_ntt::<D, _>(digit_rows_ntt_key(D, row_len, row_width)?, |ntt| {
+            mat_vec_mul_ntt_digits_i8(ntt, row_len, row_width, digit_vectors, log_basis)
+        })
     }
 }

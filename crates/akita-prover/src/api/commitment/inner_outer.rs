@@ -1,6 +1,7 @@
 use crate::compute::{
-    CommitInnerPlan, ComputeBackendSetup, DigitRowsComputeBackend, OperationCtx, RootCommitKernel,
-    RootCommitSource, RuntimeCommitBackendFor, RuntimeCommitSource,
+    digit_rows_ntt_key, CommitInnerPlan, ComputeBackendSetup, DigitRowsComputeBackend,
+    OperationCtx, RootCommitKernel, RootCommitSource, RuntimeCommitBackendFor, RuntimeCommitSource,
+    NTT_PREWARM_STACK_BYTES,
 };
 use crate::kernels::linear::decompose_commit_blocks_into;
 use crate::CommitInnerWitness;
@@ -146,26 +147,59 @@ where
         num_digits_inner: profile.inner.digits.num_digits,
         log_basis_inner: profile.inner.digits.log_basis,
     };
-    dispatch_for_field!(
-        akita_types::ProtocolDispatchSlot::Role(akita_types::RingRole::Inner),
-        F,
-        dims.d_a(),
-        |D_A| {
-            let inners = compute_inner_commitment::<F, _, _, D_A>(backend, prepared, polys, plan)?;
-            dispatch_for_field!(
-                akita_types::ProtocolDispatchSlot::Role(akita_types::RingRole::Outer),
-                F,
-                dims.d_b(),
-                |D_B| compute_outer_commitment::<F, _, D_A, D_B>(
-                    backend,
-                    prepared,
-                    inners,
-                    &profile,
-                    &slice_geometry,
+    let commit = || {
+        dispatch_for_field!(
+            akita_types::ProtocolDispatchSlot::Role(akita_types::RingRole::Inner),
+            F,
+            dims.d_a(),
+            |D_A| {
+                let inners =
+                    compute_inner_commitment::<F, _, _, D_A>(backend, prepared, polys, plan)?;
+                dispatch_for_field!(
+                    akita_types::ProtocolDispatchSlot::Role(akita_types::RingRole::Outer),
+                    F,
+                    dims.d_b(),
+                    |D_B| compute_outer_commitment::<F, _, D_A, D_B>(
+                        backend,
+                        prepared,
+                        inners,
+                        &profile,
+                        &slice_geometry,
+                    )
                 )
-            )
-        }
-    )
+            }
+        )
+    };
+    // The outer digit rows read a setup NTT prefix that depends only on the
+    // profile. Building it on a helper thread overlaps it with the inner
+    // commitment (on Metal, the root dispatch, which leaves the CPU idle);
+    // `digit_rows` waits on the same single-flight cell if it gets there first.
+    #[cfg(feature = "parallel")]
+    {
+        let outer_ntt_key = digit_rows_ntt_key(
+            dims.d_b(),
+            profile.outer.matrix.output_rank(),
+            slice_geometry.physical_input_width(),
+        )?;
+        std::thread::scope(|scope| {
+            let prewarm = std::thread::Builder::new()
+                .name("akita-outer-ntt-prewarm".into())
+                .stack_size(NTT_PREWARM_STACK_BYTES)
+                .spawn_scoped(scope, || backend.ensure_ntt_slot(prepared, outer_ntt_key))
+                .map_err(|err| {
+                    AkitaError::InvalidSetup(format!(
+                        "outer NTT prewarm thread spawn failed: {err}"
+                    ))
+                })?;
+            let commitment = commit();
+            prewarm.join().map_err(|_| {
+                AkitaError::InvalidSetup("outer NTT prewarm thread panicked".into())
+            })??;
+            commitment
+        })
+    }
+    #[cfg(not(feature = "parallel"))]
+    commit()
 }
 
 /// Apply one physical B matrix to every canonical slice and stack the images.

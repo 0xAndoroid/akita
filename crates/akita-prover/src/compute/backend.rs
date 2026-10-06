@@ -2,7 +2,7 @@ use crate::compute::requirements::RoutedNttRequirement;
 use crate::AkitaProverSetup;
 use akita_algebra::CyclotomicRing;
 use akita_error::AkitaError;
-use akita_types::{AkitaExpandedSetup, NttCacheKey};
+use akita_types::{AkitaExpandedSetup, NttCacheKey, NttTransformDomain};
 use jolt_field::{CanonicalEncoding, Field};
 use std::sync::Arc;
 
@@ -180,6 +180,16 @@ where
         digit_vectors: &[&[[i8; D]]],
         log_basis: u32,
     ) -> Result<Vec<Vec<CyclotomicRing<F, D>>>, AkitaError>;
+}
+
+/// Shared-matrix NTT prefix that CPU `digit_rows::<D>` reads for `row_len`
+/// rows over inputs of `row_width` ring elements.
+pub(crate) fn digit_rows_ntt_key(
+    ring_d: usize,
+    row_len: usize,
+    row_width: usize,
+) -> Result<NttCacheKey, AkitaError> {
+    NttCacheKey::from_matrix_shape(ring_d, row_len, row_width, NttTransformDomain::Negacyclic)
 }
 
 /// Cyclic digit mat-vec operations needed by ring-switch relation code.

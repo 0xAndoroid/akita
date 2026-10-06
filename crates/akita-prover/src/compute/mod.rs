@@ -34,6 +34,7 @@ mod requirements;
 mod runtime_capabilities;
 mod stack;
 
+pub(crate) use backend::digit_rows_ntt_key;
 pub use backend::{
     CompressionComputeBackend, CompressionRowsProducts, ComputeBackendSetup,
     CyclicRowsComputeBackend, DigitRowsComputeBackend, NttCacheOwnerId,
