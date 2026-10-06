@@ -386,6 +386,50 @@ impl akita_types::WitnessCoefficientSink for OffsetSink<'_> {
     }
 }
 
+/// Outer gadget digits `t_hat` of one group's commitment hint rows.
+pub(crate) fn hint_outer_digits<F: Field + CanonicalEncoding>(
+    inner_rows_by_polynomial: &[RingVec<F>],
+    group_lp: &akita_types::GroupOpenPhaseParams,
+    group_dims: CommitmentRingDims,
+) -> Result<DigitBlocks, AkitaError> {
+    let expected_rings_per_polynomial = group_lp
+        .num_live_blocks()
+        .checked_mul(group_lp.a_rows_len())
+        .ok_or_else(|| AkitaError::InvalidSetup("commitment hint row count overflow".into()))?;
+    dispatch_for_field!(
+        ProtocolDispatchSlot::Role(RingRole::Inner),
+        F,
+        group_dims.d_a(),
+        |D_G| {
+            dispatch_for_field!(
+                ProtocolDispatchSlot::Role(RingRole::Outer),
+                F,
+                group_dims.d_b(),
+                |D_B| {
+                    let mut blocks = Vec::with_capacity(
+                        inner_rows_by_polynomial.len() * group_lp.num_live_blocks(),
+                    );
+                    for rows in inner_rows_by_polynomial {
+                        let typed_rows = rows.as_ring_slice::<D_G>()?;
+                        if typed_rows.len() != expected_rings_per_polynomial {
+                            return Err(AkitaError::InvalidSize {
+                                expected: expected_rings_per_polynomial,
+                                actual: typed_rows.len(),
+                            });
+                        }
+                        blocks.extend(typed_rows.chunks_exact(group_lp.a_rows_len()));
+                    }
+                    decompose_commit_blocks_into::<F, D_G, D_B>(
+                        &blocks,
+                        group_lp.num_digits_outer(),
+                        group_lp.log_basis_outer(),
+                    )
+                }
+            )
+        }
+    )
+}
+
 /// Build the witness vector `w` from the ring-relation witness.
 ///
 /// This is the first half of the ring switch: it computes `r` and assembles
@@ -416,6 +460,7 @@ where
     let RingRelationWitness {
         groups,
         d_quotients,
+        b_cyclic,
         compression,
     } = witness;
     if groups.len() != opening_batch.num_groups() {
@@ -467,43 +512,11 @@ where
                 actual: inner_rows_by_polynomial.len(),
             });
         }
-        let expected_rings_per_polynomial = group_lp
+        let t_hat = hint_outer_digits(&inner_rows_by_polynomial, &group_lp, group_dims)?;
+        let expected_coefficients = group_lp
             .num_live_blocks()
             .checked_mul(group_lp.a_rows_len())
-            .ok_or_else(|| AkitaError::InvalidSetup("commitment hint row count overflow".into()))?;
-        let t_hat = dispatch_for_field!(
-            ProtocolDispatchSlot::Role(RingRole::Inner),
-            F,
-            group_dims.d_a(),
-            |D_G| {
-                dispatch_for_field!(
-                    ProtocolDispatchSlot::Role(RingRole::Outer),
-                    F,
-                    group_dims.d_b(),
-                    |D_B| {
-                        let mut blocks =
-                            Vec::with_capacity(polynomial_count * group_lp.num_live_blocks());
-                        for rows in &inner_rows_by_polynomial {
-                            let typed_rows = rows.as_ring_slice::<D_G>()?;
-                            if typed_rows.len() != expected_rings_per_polynomial {
-                                return Err(AkitaError::InvalidSize {
-                                    expected: expected_rings_per_polynomial,
-                                    actual: typed_rows.len(),
-                                });
-                            }
-                            blocks.extend(typed_rows.chunks_exact(group_lp.a_rows_len()));
-                        }
-                        decompose_commit_blocks_into::<F, D_G, D_B>(
-                            &blocks,
-                            group_lp.num_digits_outer(),
-                            group_lp.log_basis_outer(),
-                        )
-                    }
-                )
-            }
-        )?;
-        let expected_coefficients = polynomial_count
-            .checked_mul(expected_rings_per_polynomial)
+            .and_then(|count| count.checked_mul(polynomial_count))
             .and_then(|count| count.checked_mul(group_dims.d_a()))
             .ok_or_else(|| {
                 AkitaError::InvalidSetup("commitment hint coefficient count overflow".into())
@@ -570,6 +583,7 @@ where
                 instance.group_openings(),
                 instance.extension_degree(),
                 &d_quotients,
+                &b_cyclic,
                 instance.rhs(),
                 compression.as_ref(),
             )

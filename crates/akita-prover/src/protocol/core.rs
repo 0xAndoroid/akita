@@ -3,6 +3,7 @@
 use crate::protocol::extension_opening_reduction::{
     ExtensionOpeningReductionGroup, ExtensionOpeningReductionProver, ExtensionOpeningReductionTerm,
 };
+use crate::protocol::ring_relation::relation_b_cyclic_rows;
 use crate::protocol::ring_switch::{
     ring_switch_build_w, ring_switch_finalize, NextWitnessState, NextWitnessStateOutput,
     RingSwitchOutput,

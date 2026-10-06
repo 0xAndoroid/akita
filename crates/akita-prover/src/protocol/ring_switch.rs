@@ -26,7 +26,7 @@ mod relation_weights;
 mod tests;
 
 pub use coeffs::ring_switch_build_w;
-pub(crate) use coeffs::PreparedRingSwitchGroup;
+pub(crate) use coeffs::{hint_outer_digits, PreparedRingSwitchGroup};
 pub use commit::{commit_terminal_w, commit_w, NextWitnessState, NextWitnessStateOutput};
 pub(crate) use evals::build_w_evals_compact;
 pub(crate) use finalize::ring_switch_finalize;

@@ -323,6 +323,10 @@ pub struct RingRelationWitness<F: Field> {
     pub groups: Vec<RingRelationGroupWitness<F>>,
     /// Level-owned D-role quotient rows retained after transcript-time `v` construction.
     pub(crate) d_quotients: RelationDQuotientWitness<F>,
+    /// Per-group cyclic B-row products `B * t_hat`. The fold driver fills them in
+    /// quotient-lift mode from the commitment hints while the opening runs; they
+    /// stay empty in reduced-evaluation mode.
+    pub(crate) b_cyclic: Vec<RingVec<F>>,
     pub(crate) compression: Option<CompressionWitnessMaterialization<F>>,
 }
 
@@ -336,6 +340,7 @@ impl<F: Field> RingRelationWitness<F> {
         Self {
             groups,
             d_quotients,
+            b_cyclic: Vec::new(),
             compression,
         }
     }

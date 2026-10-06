@@ -18,7 +18,8 @@ use akita_types::RingMultiplierOpeningPoint;
 use akita_types::{assemble_compressed_relation_rhs, assemble_relation_rhs, RingVec};
 use akita_types::{gadget_row_scalars, DigitBlocks};
 use akita_types::{
-    CommittedGroupParams, OpeningFamily, RingRelationGroupOpening, RingRelationInstance,
+    AkitaCommitmentHint, CommittedGroupParams, OpeningFamily, RingRelationGroupOpening,
+    RingRelationInstance,
 };
 use jolt_field::solinas::parallel::*;
 use jolt_field::Unreduced;
@@ -35,6 +36,7 @@ use super::fold_grind;
 use super::ring_relation_witness::{
     RelationDQuotientWitness, RingRelationGroupWitness, RingRelationWitness,
 };
+use super::ring_switch::hint_outer_digits;
 mod compression_witness;
 mod d_rows;
 mod relation_quotient;
@@ -45,9 +47,43 @@ pub(crate) use compression_witness::{
     materialize_compression_witness, CompressionSourceId, CompressionSourceWitness,
     CompressionWitnessMaterialization,
 };
+use relation_quotient::compute_group_b_cyclic_rows;
 pub(crate) use relation_quotient::{compute_multi_group_relation_quotient, RelationQuotientOutput};
 #[cfg(test)]
 pub(crate) use relation_quotient::{multi_group_quotient_calls, reset_multi_group_quotient_calls};
+
+/// Per-group cyclic B-row products `B * t_hat` of the commitment hints.
+///
+/// They read no transcript state, so the fold driver computes them on host
+/// cores while the opening backend works.
+pub(crate) fn relation_b_cyclic_rows<F, RB>(
+    ring_switch_ctx: &OperationCtx<'_, F, RB>,
+    lp: &CommittedGroupParams,
+    opening_batch: &akita_types::OpeningClaimsLayout,
+    hints: &[&AkitaCommitmentHint<F>],
+) -> Result<Vec<RingVec<F>>, AkitaError>
+where
+    F: Field + CanonicalEncoding + akita_serialization::AkitaSerialize + Ring,
+    RB: RuntimeRingSwitchProveBackend<F>,
+{
+    let _span = tracing::info_span!("relation_b_cyclic_rows").entered();
+    hints
+        .iter()
+        .enumerate()
+        .map(|(group_index, hint)| {
+            let group_lp = lp.group_params(opening_batch, group_index)?;
+            let group_dims = lp.group_role_dims(opening_batch, group_index)?;
+            let t_hat = hint_outer_digits(hint.inner_rows(), &group_lp, group_dims)?;
+            compute_group_b_cyclic_rows::<F, RB>(
+                ring_switch_ctx,
+                &group_lp,
+                group_dims,
+                opening_batch.group_layout(group_index)?.num_polynomials(),
+                &t_hat,
+            )
+        })
+        .collect()
+}
 
 struct EvaluationTraceOpeningMaterial<F: Field> {
     e_folded: RingVec<F>,
@@ -395,7 +431,7 @@ impl RingRelationProver {
         opening_ctx: &OperationCtx<'_, F, OB>,
         ring_switch_ctx: &OperationCtx<'_, F, RB>,
         prepared_group_openings: Vec<PreparedGroupOpening<F, PointF>>,
-        block_claims: ProverOpeningData<'a, PointF, P, F>,
+        block_claims: &ProverOpeningData<'a, PointF, P, F>,
         lp: CommittedGroupParams,
         transcript: &mut T,
         level: u32,

@@ -169,166 +169,198 @@ where
         pad_base_evals,
         transcript,
     } = args;
-    let opening = stack.opening();
-    // A-role operation: prepare each group at its native A dimension,
-    // fold-evaluate its claim polynomials, and derive scalar openings before
-    // leaving the typed dispatch arm. Typed fold outputs cross the boundary
-    // only through D-free `PreparedOpeningPoint` / `RingVec` carriers.
-    let opening_batch = trace_opening_batch.clone();
-    let opening_method = uniform_opening_method(level_params, &opening_batch)?;
-    if !matches!(opening_method, akita_types::OpeningMethod::EvaluationTrace) && reduction.is_some()
-    {
-        return Err(AkitaError::InvalidSetup(
-            "coefficient packing cannot consume an extension-opening reduction".into(),
-        ));
-    }
-    let final_group_index = opening_batch.root_final_group_index()?;
-    let mut prepared_group_openings = Vec::with_capacity(opening_batch.num_groups());
-    let mut scalar_openings = Vec::with_capacity(opening_batch.num_total_polynomials());
-    for group_index in 0..opening_batch.num_groups() {
-        let group_lp = level_params
-            .group_params_geometry(&opening_batch, group_index)
-            .map_err(|err| {
-                AkitaError::InvalidInput(format!("root group params {group_index} failed: {err:?}"))
-            })?;
-        let group_dims = level_params.group_role_dims_geometry(&opening_batch, group_index)?;
-        let group_alpha_bits = group_dims.d_a().trailing_zeros() as usize;
-        let target_len = group_alpha_bits
-            .checked_add(group_lp.position_index_bits())
-            .and_then(|n| n.checked_add(group_lp.block_index_bits()))
-            .ok_or_else(|| {
-                AkitaError::InvalidSetup("group opening point length overflow".to_string())
-            })?;
-        let group_protocol_point = protocol_points
-            .get(group_index)
-            .ok_or(AkitaError::InvalidProof)?;
-        let point_width_is_valid = match group_lp.opening_method() {
-            akita_types::OpeningMethod::SubringCoefficientPacking { .. } => {
-                group_protocol_point.len() == opening_batch.group_layout(group_index)?.num_vars()
+    let hints = (0..trace_opening_batch.num_groups())
+        .map(|group_index| block_claims.group_hint(group_index))
+        .collect::<Result<Vec<_>, _>>()?;
+    std::thread::scope(|scope| {
+        let b_cyclic = matches!(
+            level_params.ring_relation_mode,
+            akita_types::RingRelationMode::QuotientLift
+        )
+        .then(|| {
+            scope.spawn(|| {
+                relation_b_cyclic_rows(
+                    stack.ring_switch(),
+                    level_params,
+                    trace_opening_batch,
+                    &hints,
+                )
+            })
+        });
+        let opening = stack.opening();
+        // A-role operation: prepare each group at its native A dimension,
+        // fold-evaluate its claim polynomials, and derive scalar openings before
+        // leaving the typed dispatch arm. Typed fold outputs cross the boundary
+        // only through D-free `PreparedOpeningPoint` / `RingVec` carriers.
+        let opening_batch = trace_opening_batch.clone();
+        let opening_method = uniform_opening_method(level_params, &opening_batch)?;
+        if !matches!(opening_method, akita_types::OpeningMethod::EvaluationTrace)
+            && reduction.is_some()
+        {
+            return Err(AkitaError::InvalidSetup(
+                "coefficient packing cannot consume an extension-opening reduction".into(),
+            ));
+        }
+        let final_group_index = opening_batch.root_final_group_index()?;
+        let mut prepared_group_openings = Vec::with_capacity(opening_batch.num_groups());
+        let mut scalar_openings = Vec::with_capacity(opening_batch.num_total_polynomials());
+        for group_index in 0..opening_batch.num_groups() {
+            let group_lp = level_params
+                .group_params_geometry(&opening_batch, group_index)
+                .map_err(|err| {
+                    AkitaError::InvalidInput(format!(
+                        "root group params {group_index} failed: {err:?}"
+                    ))
+                })?;
+            let group_dims = level_params.group_role_dims_geometry(&opening_batch, group_index)?;
+            let group_alpha_bits = group_dims.d_a().trailing_zeros() as usize;
+            let target_len = group_alpha_bits
+                .checked_add(group_lp.position_index_bits())
+                .and_then(|n| n.checked_add(group_lp.block_index_bits()))
+                .ok_or_else(|| {
+                    AkitaError::InvalidSetup("group opening point length overflow".to_string())
+                })?;
+            let group_protocol_point = protocol_points
+                .get(group_index)
+                .ok_or(AkitaError::InvalidProof)?;
+            let point_width_is_valid = match group_lp.opening_method() {
+                akita_types::OpeningMethod::SubringCoefficientPacking { .. } => {
+                    group_protocol_point.len()
+                        == opening_batch.group_layout(group_index)?.num_vars()
+                }
+                akita_types::OpeningMethod::EvaluationTrace
+                    if pad_base_evals && group_index == final_group_index =>
+                {
+                    group_protocol_point.len() <= target_len
+                }
+                akita_types::OpeningMethod::EvaluationTrace => {
+                    group_protocol_point.len() == target_len
+                }
+            };
+            if !point_width_is_valid {
+                return Err(AkitaError::InvalidPointDimension {
+                    expected: match group_lp.opening_method() {
+                        akita_types::OpeningMethod::SubringCoefficientPacking { .. } => {
+                            opening_batch.group_layout(group_index)?.num_vars()
+                        }
+                        akita_types::OpeningMethod::EvaluationTrace => target_len,
+                    },
+                    actual: group_protocol_point.len(),
+                });
             }
-            akita_types::OpeningMethod::EvaluationTrace
-                if pad_base_evals && group_index == final_group_index =>
-            {
-                group_protocol_point.len() <= target_len
+            if pad_base_evals {
+                for coordinate in group_protocol_point {
+                    append_ext_field::<F, E, T>(transcript, ABSORB_EVALUATION_CLAIMS, coordinate);
+                }
             }
-            akita_types::OpeningMethod::EvaluationTrace => group_protocol_point.len() == target_len,
-        };
-        if !point_width_is_valid {
-            return Err(AkitaError::InvalidPointDimension {
-                expected: match group_lp.opening_method() {
-                    akita_types::OpeningMethod::SubringCoefficientPacking { .. } => {
-                        opening_batch.group_layout(group_index)?.num_vars()
+            let prepared = block_claims
+                .group(group_index)?
+                .prepare_opening(
+                    opening,
+                    group_dims.d_a(),
+                    group_protocol_point,
+                    basis,
+                    group_lp.num_positions_per_block(),
+                    group_lp.num_live_blocks(),
+                    group_alpha_bits,
+                    group_lp.opening_method(),
+                )
+                .map_err(|err| {
+                    AkitaError::InvalidInput(format!(
+                        "root opening preparation group {group_index} failed: {err:?}"
+                    ))
+                })?;
+            scalar_openings.extend_from_slice(&prepared.scalar_openings);
+            prepared_group_openings.push(prepared);
+        }
+        if reduction.is_none() {
+            append_claim_values_to_transcript::<F, E, T>(&scalar_openings, transcript);
+        }
+        let (
+            crate::protocol::ring_relation::PreparedRingRelation {
+                instance,
+                mut witness,
+                groups: relation_groups,
+            },
+            (trace_claim, row_coefficients),
+        ) = RingRelationProver::new(
+            opening,
+            stack.ring_switch(),
+            prepared_group_openings,
+            &block_claims,
+            level_params.clone(),
+            transcript,
+            level,
+            |transcript| {
+                let (trace_claim, row_coefficients) = prepare_evaluation_trace_claim::<F, E, T>(
+                    &reduction,
+                    &scalar_openings,
+                    trace_opening_batch,
+                    transcript,
+                    level,
+                )
+                .map_err(|err| {
+                    AkitaError::InvalidInput(format!(
+                        "prepare evaluation-trace claim failed: {err:?}"
+                    ))
+                })?;
+                let row_coefficient_rings = dispatch_for_field!(
+                    ProtocolDispatchSlot::Role(RingRole::Inner),
+                    F,
+                    level_params.role_dims().d_a(),
+                    |D| {
+                        let row_coefficient_rings =
+                            row_coefficient_rings::<F, E, D>(&row_coefficients).map_err(|err| {
+                                AkitaError::InvalidInput(format!(
+                                    "row coefficient rings failed: {err:?}"
+                                ))
+                            })?;
+                        Ok::<_, AkitaError>(RingVec::from_ring_elems(&row_coefficient_rings))
                     }
-                    akita_types::OpeningMethod::EvaluationTrace => target_len,
-                },
-                actual: group_protocol_point.len(),
-            });
+                )
+                .map_err(|err| {
+                    AkitaError::InvalidInput(format!(
+                        "root row-coefficient preparation failed: {err:?}"
+                    ))
+                })?;
+                Ok((row_coefficient_rings, (trace_claim, row_coefficients)))
+            },
+        )
+        .map_err(|err| {
+            AkitaError::InvalidInput(format!("ring relation preparation failed: {err:?}"))
+        })?;
+        if let Some(task) = b_cyclic {
+            witness.b_cyclic = task
+                .join()
+                .map_err(|_| AkitaError::InvalidInput("B-row worker panicked".into()))??;
         }
-        if pad_base_evals {
-            for coordinate in group_protocol_point {
-                append_ext_field::<F, E, T>(transcript, ABSORB_EVALUATION_CLAIMS, coordinate);
-            }
-        }
-        let prepared = block_claims
-            .group(group_index)?
-            .prepare_opening(
-                opening,
-                group_dims.d_a(),
-                group_protocol_point,
-                basis,
-                group_lp.num_positions_per_block(),
-                group_lp.num_live_blocks(),
-                group_alpha_bits,
-                group_lp.opening_method(),
-            )
-            .map_err(|err| {
-                AkitaError::InvalidInput(format!(
-                    "root opening preparation group {group_index} failed: {err:?}"
-                ))
-            })?;
-        scalar_openings.extend_from_slice(&prepared.scalar_openings);
-        prepared_group_openings.push(prepared);
-    }
-    if reduction.is_none() {
-        append_claim_values_to_transcript::<F, E, T>(&scalar_openings, transcript);
-    }
-    let (
-        crate::protocol::ring_relation::PreparedRingRelation {
+        let opening_payload = if level_params.payload_mode.is_compressed() {
+            witness.opening_payload()?
+        } else {
+            instance.v().clone()
+        };
+        let extension_opening_reduction = reduction.map(|reduction| reduction.proof);
+        let evaluation_trace_claim_coefficients = trace_claim.claim_coefficients;
+        // Recursive suffixes still omit the public row coefficients from ring-switch
+        // finalization. Evaluation-trace coefficients are normalized independently and
+        // therefore do not inherit that path distinction.
+        let clear_recursive_trace = pad_base_evals && !level_params.has_preceding_groups();
+        let row_coefficients = if clear_recursive_trace {
+            None
+        } else {
+            Some(row_coefficients)
+        };
+        Ok(PreparedFold {
             instance,
             witness,
-            groups: relation_groups,
-        },
-        (trace_claim, row_coefficients),
-    ) = RingRelationProver::new(
-        opening,
-        stack.ring_switch(),
-        prepared_group_openings,
-        block_claims,
-        level_params.clone(),
-        transcript,
-        level,
-        |transcript| {
-            let (trace_claim, row_coefficients) = prepare_evaluation_trace_claim::<F, E, T>(
-                &reduction,
-                &scalar_openings,
-                trace_opening_batch,
-                transcript,
-                level,
-            )
-            .map_err(|err| {
-                AkitaError::InvalidInput(format!("prepare evaluation-trace claim failed: {err:?}"))
-            })?;
-            let row_coefficient_rings = dispatch_for_field!(
-                ProtocolDispatchSlot::Role(RingRole::Inner),
-                F,
-                level_params.role_dims().d_a(),
-                |D| {
-                    let row_coefficient_rings = row_coefficient_rings::<F, E, D>(&row_coefficients)
-                        .map_err(|err| {
-                            AkitaError::InvalidInput(format!(
-                                "row coefficient rings failed: {err:?}"
-                            ))
-                        })?;
-                    Ok::<_, AkitaError>(RingVec::from_ring_elems(&row_coefficient_rings))
-                }
-            )
-            .map_err(|err| {
-                AkitaError::InvalidInput(format!(
-                    "root row-coefficient preparation failed: {err:?}"
-                ))
-            })?;
-            Ok((row_coefficient_rings, (trace_claim, row_coefficients)))
-        },
-    )
-    .map_err(|err| {
-        AkitaError::InvalidInput(format!("ring relation preparation failed: {err:?}"))
-    })?;
-    let opening_payload = if level_params.payload_mode.is_compressed() {
-        witness.opening_payload()?
-    } else {
-        instance.v().clone()
-    };
-    let extension_opening_reduction = reduction.map(|reduction| reduction.proof);
-    let evaluation_trace_claim_coefficients = trace_claim.claim_coefficients;
-    // Recursive suffixes still omit the public row coefficients from ring-switch
-    // finalization. Evaluation-trace coefficients are normalized independently and
-    // therefore do not inherit that path distinction.
-    let clear_recursive_trace = pad_base_evals && !level_params.has_preceding_groups();
-    let row_coefficients = if clear_recursive_trace {
-        None
-    } else {
-        Some(row_coefficients)
-    };
-    Ok(PreparedFold {
-        instance,
-        witness,
-        opening_payload,
-        extension_opening_reduction,
-        evaluation_trace_claim: trace_claim.claimed_evaluation,
-        relation_groups,
-        evaluation_trace_claim_coefficients,
-        evaluation_trace_basis: basis,
-        row_coefficients,
+            opening_payload,
+            extension_opening_reduction,
+            evaluation_trace_claim: trace_claim.claimed_evaluation,
+            relation_groups,
+            evaluation_trace_claim_coefficients,
+            evaluation_trace_basis: basis,
+            row_coefficients,
+        })
     })
 }
 
