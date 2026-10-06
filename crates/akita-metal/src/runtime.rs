@@ -20,6 +20,8 @@ use crate::field::{Fp128Limbs, F};
 use crate::MetalCommitError;
 
 mod buffers;
+#[cfg(test)]
+mod byteroot;
 mod centered_rows;
 mod coefficient_packing;
 mod commands;
