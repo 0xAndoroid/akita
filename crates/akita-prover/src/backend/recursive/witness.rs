@@ -734,6 +734,7 @@ where
             actual: view.live_ring_elems,
         });
     }
+    let digit_values: [F; 256] = std::array::from_fn(|byte| F::from_i8(byte as u8 as i8));
     let coordinates = coefficient_packing_partials_from_position_source::<F, E, _, D>(
         fused_weights,
         view.num_vars(),
@@ -741,7 +742,7 @@ where
         |position, coefficient_index, source| {
             let flat_index = position * D + coefficient_index;
             if flat_index < view.live_coeff_len {
-                F::from_i8(source[coefficient_index])
+                digit_values[source[coefficient_index] as u8 as usize]
             } else {
                 F::zero()
             }
