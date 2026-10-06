@@ -11,6 +11,7 @@ use akita_types::{
     DigitBlocks, OpeningClaimsLayout, OpeningMethod, RelationWitnessGeometry,
     SubringCoefficientPackingGeometry,
 };
+use jolt_field::solinas::parallel::*;
 use jolt_field::{CanonicalEncoding, Field};
 
 /// Fold one group's canonical partials with its single sampled subring challenge batch.
@@ -186,48 +187,24 @@ pub(super) fn materialize_coefficient_packing_d_input<
     let params = BalancedDecomposePow2Params::new(num_digits_open, log_basis_open, q);
     let typed_planes = digits.typed_planes_mut::<D_D>()?;
 
-    for (claim_index, partials) in partials_by_claim.iter().enumerate() {
-        for block_index in 0..num_live_blocks {
-            let semantic_index = claim_index
-                .checked_mul(num_live_blocks)
-                .and_then(|base| base.checked_add(block_index))
-                .ok_or(AkitaError::InvalidProof)?;
-            let source_start = block_index
-                .checked_mul(packing_geometry.partial_base_field_width())
-                .ok_or(AkitaError::InvalidProof)?;
-            let source_end = source_start
-                .checked_add(packing_geometry.partial_base_field_width())
-                .ok_or(AkitaError::InvalidProof)?;
-            let source = partials
+    let partial_width = packing_geometry.partial_base_field_width();
+    cfg_chunks_mut!(typed_planes, planes_per_block)
+        .enumerate()
+        .try_for_each(|(semantic_index, block_planes)| {
+            let source_start = (semantic_index % num_live_blocks) * partial_width;
+            let source = partials_by_claim[semantic_index / num_live_blocks]
                 .coordinates()
-                .get(source_start..source_end)
+                .get(source_start..source_start + partial_width)
                 .ok_or(AkitaError::InvalidProof)?;
-            for subcolumn in 0..role_subcolumns {
-                let ring_start = subcolumn.checked_mul(D_D).ok_or(AkitaError::InvalidProof)?;
-                let ring_end = ring_start
-                    .checked_add(D_D)
-                    .ok_or(AkitaError::InvalidProof)?;
-                let ring = CyclotomicRing::<F, D_D>::from_slice(
-                    source
-                        .get(ring_start..ring_end)
-                        .ok_or(AkitaError::InvalidProof)?,
-                );
-                let plane_start = semantic_index
-                    .checked_mul(planes_per_block)
-                    .and_then(|base| base.checked_add(subcolumn * num_digits_open))
-                    .ok_or(AkitaError::InvalidProof)?;
-                let plane_end = plane_start
-                    .checked_add(num_digits_open)
-                    .ok_or(AkitaError::InvalidProof)?;
-                ring.balanced_decompose_pow2_i8_into_with_params(
-                    typed_planes
-                        .get_mut(plane_start..plane_end)
-                        .ok_or(AkitaError::InvalidProof)?,
-                    &params,
-                );
+            for (ring, planes) in source
+                .chunks_exact(D_D)
+                .zip(block_planes.chunks_exact_mut(num_digits_open))
+            {
+                CyclotomicRing::<F, D_D>::from_slice(ring)
+                    .balanced_decompose_pow2_i8_into_with_params(planes, &params);
             }
-        }
-    }
+            Ok::<_, AkitaError>(())
+        })?;
     Ok(digits)
 }
 

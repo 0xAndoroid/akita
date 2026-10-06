@@ -1,6 +1,7 @@
 use super::SubringCoefficientPackingGeometry;
 use akita_challenges::SparseChallenge;
 use akita_error::{checked, AkitaError};
+use jolt_field::solinas::parallel::*;
 use jolt_field::{ExtField, Field, Ring};
 use std::mem;
 
@@ -508,102 +509,119 @@ pub fn fold_coefficient_packing_partials<F: Field + Ring>(
         partial_len,
     )?;
 
-    let mut reduced = zero_vec::<F>(
-        "reduced packing product",
-        geometry.partial_base_field_width(),
-    )?;
-    let mut quotient = zero_vec::<F>("packing quotient", geometry.partial_base_field_width())?;
+    let zero = zero_vec::<F>("packing product", geometry.partial_base_field_width())?;
     let s = geometry.challenge_subring_dimension();
-    for (term_index, challenge) in challenges.iter().enumerate() {
-        let partial_offset = term_index
-            .checked_mul(geometry.partial_base_field_width())
-            .ok_or_else(|| {
-                AkitaError::InvalidInput("subring packing fold offset overflow".into())
-            })?;
-        for extension_coordinate in 0..geometry.extension_degree() {
-            let coordinate_offset = extension_coordinate.checked_mul(s).ok_or_else(|| {
-                AkitaError::InvalidInput("subring packing plane offset overflow".into())
-            })?;
-            let plane_offset = partial_offset
-                .checked_add(coordinate_offset)
+    let (reduced, quotient) = cfg_try_fold_reduce!(
+        0..challenges.len(),
+        || (zero.clone(), zero.clone()),
+        |(mut reduced, mut quotient): (Vec<F>, Vec<F>), term_index: usize| {
+            let challenge = &challenges[term_index];
+            let partial_offset = term_index
+                .checked_mul(geometry.partial_base_field_width())
                 .ok_or_else(|| {
-                    AkitaError::InvalidInput("subring packing source offset overflow".into())
+                    AkitaError::InvalidInput("subring packing fold offset overflow".into())
                 })?;
-            let plane_end = plane_offset.checked_add(s).ok_or_else(|| {
-                AkitaError::InvalidInput("subring packing source extent overflow".into())
-            })?;
-            let partial = partial_coordinates
-                .get(plane_offset..plane_end)
-                .ok_or_else(|| {
-                    AkitaError::InvalidInput("subring packing source plane is out of bounds".into())
+            for extension_coordinate in 0..geometry.extension_degree() {
+                let coordinate_offset = extension_coordinate.checked_mul(s).ok_or_else(|| {
+                    AkitaError::InvalidInput("subring packing plane offset overflow".into())
                 })?;
-            let coordinate_end = coordinate_offset.checked_add(s).ok_or_else(|| {
-                AkitaError::InvalidInput("subring packing coordinate extent overflow".into())
-            })?;
-            let reduced_plane = reduced
-                .get_mut(coordinate_offset..coordinate_end)
-                .ok_or_else(|| {
-                    AkitaError::InvalidInput(
-                        "subring packing reduced plane is out of bounds".into(),
-                    )
-                })?;
-            let quotient_plane = quotient
-                .get_mut(coordinate_offset..coordinate_end)
-                .ok_or_else(|| {
-                    AkitaError::InvalidInput(
-                        "subring packing quotient plane is out of bounds".into(),
-                    )
-                })?;
-            for (&challenge_position, &challenge_coefficient) in
-                challenge.positions.iter().zip(&challenge.coeffs)
-            {
-                let challenge_index = challenge_position as usize;
-                for (partial_index, &partial_coefficient) in partial.iter().enumerate() {
-                    let ordinary_index =
-                        challenge_index.checked_add(partial_index).ok_or_else(|| {
+                let plane_offset =
+                    partial_offset
+                        .checked_add(coordinate_offset)
+                        .ok_or_else(|| {
                             AkitaError::InvalidInput(
-                                "subring packing product index overflow".into(),
+                                "subring packing source offset overflow".into(),
                             )
                         })?;
-                    let (output_index, wraps) = if ordinary_index >= s {
-                        (ordinary_index - s, true)
-                    } else {
-                        (ordinary_index, false)
-                    };
-                    let reduced_destination =
-                        reduced_plane.get_mut(output_index).ok_or_else(|| {
-                            AkitaError::InvalidInput(
-                                "subring packing reduced index is out of bounds".into(),
-                            )
-                        })?;
-                    if wraps {
-                        accumulate_small_signed_product(
-                            reduced_destination,
-                            -partial_coefficient,
-                            challenge_coefficient,
-                        );
-                        let quotient_destination =
-                            quotient_plane.get_mut(output_index).ok_or_else(|| {
+                let plane_end = plane_offset.checked_add(s).ok_or_else(|| {
+                    AkitaError::InvalidInput("subring packing source extent overflow".into())
+                })?;
+                let partial = partial_coordinates
+                    .get(plane_offset..plane_end)
+                    .ok_or_else(|| {
+                        AkitaError::InvalidInput(
+                            "subring packing source plane is out of bounds".into(),
+                        )
+                    })?;
+                let coordinate_end = coordinate_offset.checked_add(s).ok_or_else(|| {
+                    AkitaError::InvalidInput("subring packing coordinate extent overflow".into())
+                })?;
+                let reduced_plane = reduced
+                    .get_mut(coordinate_offset..coordinate_end)
+                    .ok_or_else(|| {
+                        AkitaError::InvalidInput(
+                            "subring packing reduced plane is out of bounds".into(),
+                        )
+                    })?;
+                let quotient_plane = quotient
+                    .get_mut(coordinate_offset..coordinate_end)
+                    .ok_or_else(|| {
+                        AkitaError::InvalidInput(
+                            "subring packing quotient plane is out of bounds".into(),
+                        )
+                    })?;
+                for (&challenge_position, &challenge_coefficient) in
+                    challenge.positions.iter().zip(&challenge.coeffs)
+                {
+                    let challenge_index = challenge_position as usize;
+                    for (partial_index, &partial_coefficient) in partial.iter().enumerate() {
+                        let ordinary_index =
+                            challenge_index.checked_add(partial_index).ok_or_else(|| {
                                 AkitaError::InvalidInput(
-                                    "subring packing quotient index is out of bounds".into(),
+                                    "subring packing product index overflow".into(),
                                 )
                             })?;
-                        accumulate_small_signed_product(
-                            quotient_destination,
-                            partial_coefficient,
-                            challenge_coefficient,
-                        );
-                    } else {
-                        accumulate_small_signed_product(
-                            reduced_destination,
-                            partial_coefficient,
-                            challenge_coefficient,
-                        );
+                        let (output_index, wraps) = if ordinary_index >= s {
+                            (ordinary_index - s, true)
+                        } else {
+                            (ordinary_index, false)
+                        };
+                        let reduced_destination =
+                            reduced_plane.get_mut(output_index).ok_or_else(|| {
+                                AkitaError::InvalidInput(
+                                    "subring packing reduced index is out of bounds".into(),
+                                )
+                            })?;
+                        if wraps {
+                            accumulate_small_signed_product(
+                                reduced_destination,
+                                -partial_coefficient,
+                                challenge_coefficient,
+                            );
+                            let quotient_destination =
+                                quotient_plane.get_mut(output_index).ok_or_else(|| {
+                                    AkitaError::InvalidInput(
+                                        "subring packing quotient index is out of bounds".into(),
+                                    )
+                                })?;
+                            accumulate_small_signed_product(
+                                quotient_destination,
+                                partial_coefficient,
+                                challenge_coefficient,
+                            );
+                        } else {
+                            accumulate_small_signed_product(
+                                reduced_destination,
+                                partial_coefficient,
+                                challenge_coefficient,
+                            );
+                        }
                     }
                 }
             }
+            Ok::<_, AkitaError>((reduced, quotient))
+        },
+        |(mut reduced, mut quotient): (Vec<F>, Vec<F>),
+         (other_reduced, other_quotient): (Vec<F>, Vec<F>)| {
+            for (destination, value) in reduced.iter_mut().zip(other_reduced) {
+                *destination += value;
+            }
+            for (destination, value) in quotient.iter_mut().zip(other_quotient) {
+                *destination += value;
+            }
+            Ok((reduced, quotient))
         }
-    }
+    )?;
     Ok(CoefficientPackingFoldProduct {
         geometry,
         reduced_base_field_coordinates: reduced,

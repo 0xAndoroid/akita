@@ -12,6 +12,7 @@ use akita_types::{
     coefficient_packing_scalar_opening, OpeningFamily, OpeningMethod,
     PreparedSubringCoefficientPackingPoint, SubringCoefficientPackingGeometry,
 };
+use jolt_field::solinas::parallel::*;
 use jolt_field::AdditiveGroup;
 
 pub(crate) struct PreparedEvaluationTraceGroup<F: Field, E: Field> {
@@ -204,8 +205,7 @@ where
                             actual: partials_by_claim.len(),
                         });
                     }
-                    let scalar_openings = partials_by_claim
-                        .iter()
+                    let scalar_openings = cfg_iter!(partials_by_claim)
                         .map(|partials| {
                             coefficient_packing_scalar_opening::<F, E>(
                                 geometry,
