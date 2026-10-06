@@ -2,6 +2,7 @@ use akita_algebra::offset_eq::{eq_eval_at_index, OffsetEqWindow};
 use akita_algebra::poly::multilinear_eval;
 use akita_error::AkitaError;
 use akita_types::{RelationWeightContribution, RelationWeightEvent};
+use jolt_field::solinas::parallel::*;
 use jolt_field::Field;
 
 /// Checked relation events plus the domain data needed by every consumer.
@@ -191,33 +192,55 @@ impl<E: Field> RelationWeightEvents<E> {
             .checked_div(coeff_count)
             .filter(|capacity| capacity.is_power_of_two())
             .ok_or_else(|| AkitaError::InvalidSetup("relation lane capacity is invalid".into()))?;
-        let mut relation_lane_weights = vec![E::zero(); lane_capacity];
-        for event in &self.events {
+        let mut lane_events = Vec::with_capacity(self.events.len());
+        let mut max_event_lanes = 0;
+        for (event_index, event) in self.events.iter().enumerate() {
             let coefficients = event.physical_coefficients();
             if !coefficients.start.is_multiple_of(coeff_count)
                 || !coefficients.len().is_multiple_of(coeff_count)
                 || !event.alpha_exponent_start().is_multiple_of(coeff_count)
+                || coefficients.end / coeff_count > lane_capacity
+                || event.alpha_exponent_start() + coefficients.len() > self.alpha_powers.len()
             {
                 return Err(AkitaError::InvalidSetup(
                     "relation event does not preserve the common alpha factor".into(),
                 ));
             }
-            let weights = relation_lane_weights
-                .get_mut(coefficients.start / coeff_count..coefficients.end / coeff_count)
-                .ok_or(AkitaError::InvalidProof)?;
-            let alpha_start = event.alpha_exponent_start();
-            let powers = self
-                .alpha_powers
-                .get(alpha_start..alpha_start + coefficients.len())
-                .ok_or(AkitaError::InvalidProof)?;
-            for (weight, &power) in weights.iter_mut().zip(powers.iter().step_by(coeff_count)) {
-                *weight += if power == E::one() {
-                    event.scalar()
-                } else {
-                    event.scalar() * power
-                };
-            }
+            max_event_lanes = max_event_lanes.max(coefficients.len() / coeff_count);
+            lane_events.push((coefficients.start / coeff_count, event_index));
         }
+        // Events may overlap; field sums are exact, so accumulating by sorted
+        // lane chunks leaves the weights unchanged.
+        #[cfg(feature = "parallel")]
+        lane_events.par_sort_unstable();
+        #[cfg(not(feature = "parallel"))]
+        lane_events.sort_unstable();
+        const LANES_PER_CHUNK: usize = 1 << 14;
+        let mut relation_lane_weights = vec![E::zero(); lane_capacity];
+        cfg_chunks_mut!(relation_lane_weights, LANES_PER_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_index, weights)| {
+                let chunk_start = chunk_index * LANES_PER_CHUNK;
+                let chunk_end = chunk_start + weights.len();
+                let first =
+                    lane_events.partition_point(|&(lane, _)| lane + max_event_lanes <= chunk_start);
+                for &(event_lane, event_index) in &lane_events[first..] {
+                    if event_lane >= chunk_end {
+                        break;
+                    }
+                    let event = &self.events[event_index];
+                    let event_end = event_lane + event.physical_coefficients().len() / coeff_count;
+                    for lane in event_lane.max(chunk_start)..event_end.min(chunk_end) {
+                        let power = self.alpha_powers
+                            [event.alpha_exponent_start() + (lane - event_lane) * coeff_count];
+                        weights[lane - chunk_start] += if power == E::one() {
+                            event.scalar()
+                        } else {
+                            event.scalar() * power
+                        };
+                    }
+                }
+            });
         let common_alpha_factor = self
             .alpha_powers
             .get(..coeff_count)

@@ -646,14 +646,19 @@ impl PackedSignedDigitIter<'_> {
 
 fn decode_prefix(digits: &PackedSignedDigits, output: &mut [i8]) {
     let full_blocks = output.len() / DIGITS_PER_BLOCK;
-    for (block_index, block) in output
-        .chunks_exact_mut(DIGITS_PER_BLOCK)
-        .take(full_blocks)
-        .enumerate()
-    {
+    let decode_block = |(block_index, block): (usize, &mut [i8])| {
         let block: &mut [i8; DIGITS_PER_BLOCK] = block.try_into().expect("exact chunk length");
         decode_full_block(digits, block_index, block);
-    }
+    };
+    let full = &mut output[..full_blocks * DIGITS_PER_BLOCK];
+    #[cfg(feature = "parallel")]
+    full.par_chunks_exact_mut(DIGITS_PER_BLOCK)
+        .enumerate()
+        .for_each(decode_block);
+    #[cfg(not(feature = "parallel"))]
+    full.chunks_exact_mut(DIGITS_PER_BLOCK)
+        .enumerate()
+        .for_each(decode_block);
     for (index, slot) in output
         .iter_mut()
         .enumerate()
