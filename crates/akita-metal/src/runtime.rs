@@ -15,6 +15,7 @@ use metal::{
     ComputePipelineState, Device, MTLCommandBufferStatus, MTLResourceOptions, MTLSize,
 };
 
+use crate::backend::CommandProgress;
 use crate::error::metal_status::CommandStatus;
 use crate::field::{Fp128Limbs, F};
 use crate::MetalCommitError;

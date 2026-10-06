@@ -131,10 +131,15 @@ struct BackendInner {
     last_opening_metrics: Mutex<Option<MetalOpeningMetrics>>,
 }
 
+/// Observer of a packed root commit's progress, called with
+/// `(completed, total)` command buffers as each completes in order.
+pub type CommandProgress = dyn Fn(usize, usize) + Send + Sync;
+
 /// Akita compute backend with explicit Metal admission and CPU delegation.
 #[derive(Clone)]
 pub struct MetalBackend {
     inner: Arc<BackendInner>,
+    command_progress: Option<Arc<CommandProgress>>,
 }
 
 impl MetalBackend {
@@ -168,6 +173,7 @@ impl MetalBackend {
                 last_commit_metrics: Mutex::new(None),
                 last_opening_metrics: Mutex::new(None),
             }),
+            command_progress: None,
         })
     }
 
@@ -196,7 +202,21 @@ impl MetalBackend {
                 last_commit_metrics: Mutex::new(None),
                 last_opening_metrics: Mutex::new(None),
             }),
+            command_progress: None,
         })
+    }
+
+    /// This backend with `progress` observing the D128 rank-3 packed root
+    /// commit's command buffers; other kernels do not report progress.
+    pub fn with_command_progress(&self, progress: Arc<CommandProgress>) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            command_progress: Some(progress),
+        }
+    }
+
+    pub(crate) fn command_progress(&self) -> Option<&CommandProgress> {
+        self.command_progress.as_deref()
     }
 
     /// Runtime compilation plus pipeline creation time.

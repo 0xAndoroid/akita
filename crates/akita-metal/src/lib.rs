@@ -64,7 +64,7 @@ mod ring_switch;
 mod runtime;
 
 #[cfg(target_os = "macos")]
-pub use backend::{MetalBackend, MetalCommitMetrics, MetalOpeningMetrics};
+pub use backend::{CommandProgress, MetalBackend, MetalCommitMetrics, MetalOpeningMetrics};
 #[cfg(target_os = "macos")]
 pub use packed_onehot::PackedOneHotCommitView;
 #[cfg(target_os = "macos")]

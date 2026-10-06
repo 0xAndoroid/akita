@@ -176,6 +176,7 @@ pub(crate) fn commit_validated<const D: usize>(
                 source.active_zero_rows(),
                 params,
                 streams_per_command(shape.active_a_cols),
+                backend.command_progress(),
             )
         })
         .map_err(MetalCommitError::into_akita)?;

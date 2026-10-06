@@ -354,6 +354,7 @@ impl MetalRuntime {
         active_zero_rows: &[u64],
         mut params: PackedOneHotCommitParams,
         streams_per_command: usize,
+        progress: Option<&CommandProgress>,
     ) -> Result<DispatchOutcome, MetalCommitError> {
         autoreleasepool(|| {
             let expected_active_words = params.num_rows.div_ceil(u64::BITS as u64);
@@ -554,6 +555,12 @@ impl MetalRuntime {
             );
             reduction.end_encoding();
             reduction_command.commit();
+            if let Some(progress) = progress {
+                for (index, command) in commands.iter().enumerate() {
+                    command.wait_until_completed();
+                    progress(index + 1, commands.len());
+                }
+            }
             reduction_command.wait_until_completed();
             let command_wall = command_start.elapsed();
             for command in &commands {
