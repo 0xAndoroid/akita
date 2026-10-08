@@ -66,7 +66,7 @@ fn w8r2_ntt_requirements_match_distributed_a_tail_decisions() {
         NttCacheKey::from_matrix_shape(128, 4, 2_048, NttTransformDomain::I16TailBothTransforms)
             .expect("valid W8R2 prefix tail key");
     let requirements =
-        NttExecutionRequirements::from_prove_schedule(&schedule).expect("NTT requirements");
+        NttExecutionRequirements::from_prove_schedule(&schedule, true).expect("NTT requirements");
     let has_tail = |expected| {
         requirements.entries().iter().any(|entry| {
             entry.fold_level == 1

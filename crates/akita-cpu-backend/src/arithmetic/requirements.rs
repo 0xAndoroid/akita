@@ -53,7 +53,7 @@ impl NttExecutionRequirements {
     pub(crate) fn from_commit_and_prove_schedule(
         schedule: &FoldSchedule,
     ) -> Result<Self, AkitaError> {
-        let mut requirements = Self::from_prove_schedule(schedule)?;
+        let mut requirements = Self::from_prove_schedule(schedule, true)?;
         let root = &schedule.root.params;
         requirements.add_group_commit(0, root, SignedCommitSource::Dense)?;
         for precommitted in root.precommitted_groups() {
@@ -65,10 +65,14 @@ impl NttExecutionRequirements {
     /// Compile matrix work performed by one resolved prover execution.
     ///
     /// The root commitment is completed before `batched_prove` and remains
-    /// excluded. Setup-prefix commitments are part of the execution plan:
-    /// their slots are prepared before the recursive fold consumes them, so
-    /// their commit-cluster requirements must be included here.
-    pub(crate) fn from_prove_schedule(schedule: &FoldSchedule) -> Result<Self, AkitaError> {
+    /// excluded. `include_setup_prefix_commitments` adds the commit-cluster
+    /// requirements of setup-prefix commitments; `false` omits that commitment
+    /// work, which setup-prefix import manages, whether or not the import has
+    /// run yet. Prefix relation work is always planned.
+    pub(crate) fn from_prove_schedule(
+        schedule: &FoldSchedule,
+        include_setup_prefix_commitments: bool,
+    ) -> Result<Self, AkitaError> {
         schedule.validate_structure()?;
         let mut requirements = Self::default();
         let root = &schedule.root.params;
@@ -90,12 +94,14 @@ impl NttExecutionRequirements {
             )?;
             requirements.add_group_relation(level, &step.params, num_chunks)?;
             if let Some(prefix) = &step.params.setup_prefix() {
-                requirements.add_setup_prefix_commitment(
-                    level,
-                    &prefix.slot_id().ok_or_else(|| {
-                        AkitaError::Internal("setup prefix group has no slot identity".into())
-                    })?,
-                )?;
+                if include_setup_prefix_commitments {
+                    requirements.add_setup_prefix_commitment(
+                        level,
+                        &prefix.slot_id().ok_or_else(|| {
+                            AkitaError::Internal("setup prefix group has no slot identity".into())
+                        })?,
+                    )?;
+                }
                 requirements.add_precommitted_relation(level, prefix, num_chunks)?;
             }
             requirements.add_opening_relation(level, &step.params)?;
@@ -621,6 +627,7 @@ const fn domain_order(domain: NttTransformDomain) -> u8 {
 mod tests {
     use super::*;
     use akita_config::proof_optimized::{fp128, fp32, fp64};
+    use akita_config::RecursiveCommitmentConfig;
     use akita_params::PolynomialGroupLayout;
     use akita_params::ScheduleLookupKey;
 
@@ -865,8 +872,8 @@ mod tests {
             .expect("generated schedule")
             .schedule()
             .clone();
-        let requirements =
-            NttExecutionRequirements::from_prove_schedule(&schedule).expect("compile requirements");
+        let requirements = NttExecutionRequirements::from_prove_schedule(&schedule, true)
+            .expect("compile requirements");
         let mut expected_root_level_commits = NttExecutionRequirements::default();
         if let Some(first_recursive) = schedule.recursive_folds.first() {
             expected_root_level_commits
@@ -918,7 +925,7 @@ mod tests {
             .expect("generated schedule")
             .schedule()
             .clone();
-        let prove = NttExecutionRequirements::from_prove_schedule(&schedule).unwrap();
+        let prove = NttExecutionRequirements::from_prove_schedule(&schedule, true).unwrap();
         let complete = NttExecutionRequirements::from_commit_and_prove_schedule(&schedule).unwrap();
         let root = &schedule.root.params;
         assert!(complete.entries().iter().any(|entry| {
@@ -927,6 +934,46 @@ mod tests {
                 && entry.key.ring_d == root.inner().matrix.ring_dimension()
         }));
         assert!(complete.entries().len() >= prove.entries().len());
+    }
+
+    #[test]
+    fn imported_setup_prefixes_omit_only_their_commitments() {
+        type RecursiveOneHot = RecursiveCommitmentConfig<fp128::OneHot>;
+        let catalog = akita_config::test_support::workspace_schedule_catalog::<RecursiveOneHot>()
+            .expect("recursive schedule catalog");
+        let schedule = catalog
+            .rows()
+            .map(|row| row.schedule())
+            .find(|schedule| {
+                schedule
+                    .recursive_folds
+                    .iter()
+                    .any(|fold| fold.params.setup_prefix().is_some())
+            })
+            .expect("recursive schedule with a setup prefix")
+            .clone();
+        let mut prefix_commitments = NttExecutionRequirements::default();
+        for (index, step) in schedule.recursive_folds.iter().enumerate() {
+            if let Some(prefix) = step.params.setup_prefix() {
+                prefix_commitments
+                    .add_setup_prefix_commitment(index + 1, &prefix.slot_id().unwrap())
+                    .unwrap();
+            }
+        }
+        assert!(!prefix_commitments.entries.is_empty());
+
+        let mut remaining = NttExecutionRequirements::from_prove_schedule(&schedule, true)
+            .unwrap()
+            .entries;
+        for entry in &prefix_commitments.entries {
+            let position = remaining
+                .iter()
+                .position(|candidate| candidate == entry)
+                .expect("full prove plan contains each setup-prefix commitment");
+            remaining.remove(position);
+        }
+        let imported = NttExecutionRequirements::from_prove_schedule(&schedule, false).unwrap();
+        assert_eq!(remaining, imported.entries);
     }
 
     #[test]
@@ -972,8 +1019,8 @@ mod tests {
             .expect("generated dense schedule")
             .schedule()
             .clone();
-        let requirements =
-            NttExecutionRequirements::from_prove_schedule(&schedule).expect("compile requirements");
+        let requirements = NttExecutionRequirements::from_prove_schedule(&schedule, true)
+            .expect("compile requirements");
         let root = &schedule.root.params;
         let (negative, positive) = akita_params::sis::balanced_digit_representable_bounds(
             root.open().digits.log_basis,
