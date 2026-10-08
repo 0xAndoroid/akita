@@ -439,6 +439,16 @@ fn sparse_mul_acc_i16_simd_matches_scalar() {
 }
 
 #[test]
+fn narrow_rotation_preserves_signed_minimum() {
+    const D: usize = 128;
+    let mut plane = [0i16; D];
+    plane[0] = i16::MIN;
+    let mut actual = [0i16; D];
+    super::narrow_accum::sparse_mul_acc_i16_terms(&plane, &[0], &[1], &mut actual);
+    assert_eq!(actual, plane);
+}
+
+#[test]
 fn prepared_pm1_kernels_match_generic_sparse_accumulation() {
     const D: usize = 256;
     let positive = vec![0, 17, 61, 128, 251];

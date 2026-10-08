@@ -102,6 +102,18 @@ pub(super) fn sparse_mul_acc_i16_terms<const D: usize>(
     acc: &mut [i16; D],
 ) {
     debug_assert_eq!(positions.len(), coefficients.len());
+    if D == 128 && !digit_plane.contains(&i16::MIN) {
+        // Fixed-length rotations let the compiler retain the accumulator in
+        // vector registers across terms. Negation needs a representable digit.
+        let doubled = [digit_plane.map(|value| -value), *digit_plane];
+        let doubled = doubled.as_flattened();
+        for (&position, &coefficient) in positions.iter().zip(coefficients) {
+            debug_assert!(position < D as u32);
+            let start = D - position as usize;
+            accumulate_i16_segment(&doubled[start..start + D], acc, i16::from(coefficient));
+        }
+        return;
+    }
     for (&position, &coefficient) in positions.iter().zip(coefficients) {
         debug_assert!(position < D as u32);
         let position = position as usize;
